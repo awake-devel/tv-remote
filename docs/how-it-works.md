@@ -47,7 +47,7 @@ Notes:
 
 ## Config file
 
-Location: `~/.config/samsung-tv/config.json` (or `$XDG_CONFIG_HOME/samsung-tv/config.json`). It's written atomically, with mode 0600, because it holds tokens. If it exists but can't be parsed, TV Remote never overwrites it.
+Location: `~/.config/samsung-tv/config.json` (or `$XDG_CONFIG_HOME/samsung-tv/config.json`). It's written atomically, with mode 0600, because it holds tokens. If it's a symbolic link (for example into a dotfiles repository), the file it points to is updated and the link is kept. If it exists but can't be parsed, TV Remote never overwrites it, even if it breaks while an app is running.
 
 Format (version 2), with placeholder values:
 
@@ -94,7 +94,7 @@ Format (version 2), with placeholder values:
 
 A file in the old flat format (version 1, a single TV, no `tvs` key) is migrated on load: its TV becomes `tv1` and keeps its token, so the TV doesn't prompt again. Unknown keys are kept.
 
-The SmartThings refresh token is single-use, and the GUI, the CLI and the daily timer share the file. So every save takes a lock on `config.json.lock` and re-reads the SmartThings section first. A process never writes back a token another process already replaced.
+The SmartThings refresh token is single-use, and the GUI, the CLI and the daily timer share the file. So every save takes a lock on `config.json.lock`, re-reads the whole file, applies its change and saves. A process never writes back a token another process already replaced, and never drops a TV or a setting another process changed meanwhile (for example `tvs add` while the desktop app is open).
 
 Other files:
 

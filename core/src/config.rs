@@ -44,11 +44,13 @@
 //! # SmartThings OAuth tokens and concurrent processes
 //!
 //! The OAuth refresh token is single-use, and several processes (the GUI, the CLI, the
-//! daily refresh timer) share this file. So the file, not memory, is authoritative for
-//! `smartthings_oauth`: every save through [`SharedConfig`] takes an exclusive `flock`
-//! on `config.json.lock` (see [`lock_path`]) and first adopts that section from the
-//! file, so a process never writes back tokens another process already rotated. Token
-//! refreshes run under the same lock ([`SharedConfig::with_oauth_locked`]).
+//! daily refresh timer) share this file. So the file, not memory, is authoritative:
+//! every save through [`SharedConfig`] takes an exclusive `flock` on `config.json.lock`
+//! (see [`lock_path`]) and first re-reads the whole file, then applies its change and
+//! saves (a read-modify-write transaction). A process therefore never writes back
+//! tokens another process already rotated, nor drops a TV another process added. Token
+//! refreshes run under the same lock ([`SharedConfig::with_oauth_locked`]). If the file
+//! became unparseable after it was loaded, saves fail instead of overwriting it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -426,30 +428,36 @@ impl AppConfig {
         }
     }
 
-    /// Save atomically (temp file + rename) with permissions 0600.
+    /// Save atomically (temp file + rename) with permissions 0600. A symlinked config
+    /// (e.g. kept in a dotfiles repository) is written through: its target is replaced,
+    /// not the link. A missing directory is created with mode 0700.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
+        let target = resolve_symlinks(path);
+        let ctx = |e: std::io::Error| Error::Config(format!("cannot save {}: {e}", target.display()));
+        if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
+            create_private_dir(dir).map_err(ctx)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        let tmp = target.with_extension("json.tmp");
         let text = serde_json::to_string_pretty(&self.to_json()?)?;
-        {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)?;
-            f.write_all(text.as_bytes())?;
-            f.write_all(b"\n")?;
-            f.sync_all()?;
-        }
-        // mode() only applies on creation; enforce it if the temp file pre-existed.
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-        fs::rename(&tmp, path)?;
-        Ok(())
+        let write = || -> std::io::Result<()> {
+            {
+                let mut f = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp)?;
+                f.write_all(text.as_bytes())?;
+                f.write_all(b"\n")?;
+                f.sync_all()?;
+            }
+            // mode() only applies on creation; enforce it if the temp file pre-existed.
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+            fs::rename(&tmp, &target)
+        };
+        write().map_err(ctx)
     }
 
     /// True if SmartThings is usable: OAuth connected, or a personal access token.
@@ -811,23 +819,23 @@ impl SharedConfig {
 
     /// Mutate the whole config and persist it to the backing file (if any).
     ///
-    /// With a backing file this holds its `flock` (see [`lock_path`]) and first adopts
-    /// the file's `smartthings_oauth` section, which another process may have rotated.
+    /// With a backing file this is a read-modify-write transaction: it holds the file's
+    /// `flock` (see [`lock_path`]), first adopts the file as it is now (another process,
+    /// e.g. the CLI next to a running GUI, may have changed TVs or rotated the
+    /// SmartThings tokens), then applies `f` and saves. A file that exists but cannot
+    /// be parsed any more is never overwritten: the update fails instead.
     /// Never call it from inside [`SharedConfig::with_oauth_locked`].
     pub fn update_app<R>(&self, f: impl FnOnce(&mut AppConfig) -> R) -> Result<R> {
         let _lock = match &self.path {
             Some(p) => Some(FileLock::acquire(p)?),
             None => None,
         };
-        let disk = self.path.as_deref().and_then(disk_oauth);
+        self.adopt_disk_locked()?;
         let (snapshot, r) = {
             let mut guard = self
                 .inner
                 .write()
                 .map_err(|_| Error::Config("config lock poisoned".into()))?;
-            if let Some(d) = disk {
-                guard.smartthings_oauth = d;
-            }
             let r = f(&mut guard);
             guard.fix_active();
             (guard.clone(), r)
@@ -836,6 +844,30 @@ impl SharedConfig {
             snapshot.save_to(p)?;
         }
         Ok(r)
+    }
+
+    /// Replace memory with the backing file's current contents. Call it with the file
+    /// lock held. No file (or none yet) keeps memory; a file that cannot be read or
+    /// parsed is an error, so that it is never overwritten.
+    fn adopt_disk_locked(&self) -> Result<()> {
+        let Some(p) = &self.path else { return Ok(()) };
+        let text = match fs::read_to_string(p) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(Error::Config(format!("cannot read {}: {e}; not saving", p.display()))),
+        };
+        let disk = serde_json::from_str::<Value>(&text)
+            .map_err(|e| e.to_string())
+            .and_then(|v| AppConfig::from_json(v).map_err(|e| e.to_string()))
+            .map_err(|e| {
+                Error::Config(format!(
+                    "{} is not a valid config any more ({e}); it is not overwritten: fix or move it",
+                    p.display()
+                ))
+            })?;
+        let mut g = self.inner.write().map_err(|_| Error::Config("config lock poisoned".into()))?;
+        *g = disk;
+        Ok(())
     }
 
     /// The `smartthings_oauth` section as the backing file has it now (adopted into
@@ -854,9 +886,11 @@ impl SharedConfig {
 
     /// Run `f` on the `smartthings_oauth` section while holding the process-wide
     /// SmartThings mutex and the config file's `flock`, so that exactly one thread of
-    /// one process at a time can spend the single-use refresh token. The section is
-    /// re-read from the file first (another process may have rotated it); if `f`
-    /// changes it, the change is saved **immediately** (before `f`'s result is used).
+    /// one process at a time can spend the single-use refresh token. The whole file is
+    /// re-read first (another process may have rotated the tokens or changed TVs); if
+    /// `f` changes the section, the change is saved **immediately** (before `f`'s result
+    /// is used). If the file cannot be parsed any more, `f` is not run at all, so a
+    /// refresh token is never spent without a place to save its successor.
     /// `f` may do network I/O; it must not call [`SharedConfig::update_app`].
     pub fn with_oauth_locked<R>(&self, f: impl FnOnce(&mut Option<StOAuth>) -> Result<R>) -> Result<R> {
         static PROCESS_LOCK: Mutex<()> = Mutex::new(());
@@ -865,7 +899,8 @@ impl SharedConfig {
             Some(p) => Some(FileLock::acquire(p)?),
             None => None,
         };
-        let mut cur = self.oauth_from_disk();
+        self.adopt_disk_locked()?;
+        let mut cur = self.app().smartthings_oauth;
         let before = cur.clone();
         let res = f(&mut cur);
         if cur != before {
@@ -883,6 +918,27 @@ impl SharedConfig {
         }
         res
     }
+}
+
+/// `path` with its symlinks followed (up to 16 levels; relative targets resolve against
+/// the link's directory). Dangling links resolve to their target, so the first save
+/// creates it. A path that is not a symlink is returned unchanged.
+fn resolve_symlinks(path: &Path) -> PathBuf {
+    let mut p = path.to_path_buf();
+    for _ in 0..16 {
+        match fs::read_link(&p) {
+            Ok(t) if t.is_absolute() => p = t,
+            Ok(t) => p = p.parent().map(|d| d.join(&t)).unwrap_or(t),
+            Err(_) => break,
+        }
+    }
+    p
+}
+
+/// `create_dir_all`, with mode 0700 for the directories it creates (they hold tokens).
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
 /// The lock file guarding the config file `path`: `config.json.lock` next to it.
@@ -913,10 +969,18 @@ impl FileLock {
     fn acquire(config_path: &Path) -> Result<FileLock> {
         use std::os::unix::fs::OpenOptionsExt;
         let lp = lock_path(config_path);
-        if let Some(dir) = lp.parent() {
-            fs::create_dir_all(dir)?;
+        let ctx = |e: std::io::Error| Error::Config(format!("cannot save {}: {e}", lp.display()));
+        if let Some(dir) = lp.parent().filter(|d| !d.as_os_str().is_empty()) {
+            create_private_dir(dir).map_err(ctx)?;
         }
-        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(&lp)?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&lp)
+            .map_err(ctx)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         loop {
             match file.try_lock() {
@@ -1064,6 +1128,112 @@ mod tests {
             .unwrap();
         assert_eq!(AppConfig::load_from(&path).unwrap().smartthings_oauth.unwrap().access_token.as_deref(), Some("new-access"));
         assert_eq!(shared.app().smartthings_oauth.unwrap().access_token.as_deref(), Some("new-access"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_processes_do_not_lose_each_others_changes() {
+        let dir = temp("lost-update");
+        let path = dir.join("config.json");
+        let mut app = AppConfig::default();
+        app.tvs.push(TvEntry::new("tv1", "Salon", "192.0.2.1"));
+        app.save_to(&path).unwrap();
+        // Two processes load the same file (e.g. the GUI, then the CLI).
+        let gui = SharedConfig::from_app(AppConfig::load_from(&path).unwrap(), Some(path.clone()));
+        let cli = SharedConfig::from_app(AppConfig::load_from(&path).unwrap(), Some(path.clone()));
+        cli.update_app(|a| {
+            let id = a.next_id();
+            a.tvs.push(TvEntry::new(&id, "Chambre", "192.0.2.2"));
+        })
+        .unwrap();
+        // The GUI's next save (stale memory) must keep the TV the CLI added.
+        gui.update_app(|a| a.entry_mut("tv1").unwrap().name = "Living room".into()).unwrap();
+        let disk = AppConfig::load_from(&path).unwrap();
+        assert_eq!(disk.tvs.len(), 2, "the CLI's TV survived the GUI's save");
+        assert_eq!(disk.entry("tv1").unwrap().name, "Living room");
+        assert_eq!(gui.app().tvs.len(), 2, "memory follows the file");
+
+        // Many writers at once, each with its own stale copy: no add is lost, ids are unique.
+        let handles: Vec<_> = (0..12)
+            .map(|i| {
+                let p = path.clone();
+                let shared = SharedConfig::from_app(AppConfig::load_from(&p).unwrap(), Some(p));
+                std::thread::spawn(move || {
+                    shared
+                        .update_app(|a| {
+                            let id = a.next_id();
+                            a.tvs.push(TvEntry::new(&id, &format!("TV {i}"), &format!("192.0.2.{}", 10 + i)));
+                        })
+                        .unwrap()
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let disk = AppConfig::load_from(&path).unwrap();
+        assert_eq!(disk.tvs.len(), 14);
+        let mut ids: Vec<_> = disk.tvs.iter().map(|t| t.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 14, "unique ids");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_broken_after_loading_is_never_overwritten() {
+        let dir = temp("broken-later");
+        let path = dir.join("config.json");
+        let app = AppConfig { smartthings_oauth: Some(serde_json::from_str(FAKE_OAUTH).unwrap()), ..Default::default() };
+        app.save_to(&path).unwrap();
+        let shared = SharedConfig::from_app(AppConfig::load_from(&path).unwrap(), Some(path.clone()));
+        // The user edits the file by hand and leaves a typo.
+        let broken = "{\"tvs\": [ oops";
+        fs::write(&path, broken).unwrap();
+        let err = shared.update_app(|a| a.name = "x".into()).unwrap_err();
+        assert!(err.to_string().contains("not overwritten"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+        // A token refresh is not even attempted (its successor could not be saved).
+        let mut ran = false;
+        assert!(shared
+            .with_oauth_locked(|_| {
+                ran = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!ran);
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+        // Once the file is gone, saving recreates it.
+        fs::remove_file(&path).unwrap();
+        shared.update_app(|a| a.name = "y".into()).unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().name, "y");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saves_write_through_symlinks_and_create_private_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("symlink");
+        let real = dir.join("dotfiles").join("config.json");
+        let link_dir = dir.join("xdg").join("samsung-tv");
+        fs::create_dir_all(&link_dir).unwrap();
+        let link = link_dir.join("config.json");
+        std::os::unix::fs::symlink("../../dotfiles/config.json", &link).unwrap();
+        let app = AppConfig { name: "linked".into(), ..Default::default() };
+        app.save_to(&link).unwrap();
+        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is kept");
+        assert_eq!(AppConfig::load_from(&real).unwrap().name, "linked");
+        assert_eq!(fs::metadata(dir.join("dotfiles")).unwrap().permissions().mode() & 0o777, 0o700);
+        // An unwritable directory gives an error that names the file.
+        let ro = dir.join("ro");
+        fs::create_dir_all(&ro).unwrap();
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o500)).unwrap();
+        let res = app.save_to(&ro.join("config.json"));
+        fs::set_permissions(&ro, fs::Permissions::from_mode(0o700)).unwrap();
+        // (root ignores directory permissions, so the save may succeed there)
+        if let Err(e) = res {
+            assert!(e.to_string().contains("cannot save") && e.to_string().contains("ro/config.json"), "{e}");
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

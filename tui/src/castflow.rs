@@ -79,7 +79,7 @@ impl ProfileForm {
             .filter(|s| !s.is_text_subtitle())
             .count();
         let mut f = ProfileForm {
-            friendly: report.level != CompatLevel::Plays,
+            friendly: report.needs_tv_friendly(),
             report,
             audio_opts,
             audio_sel: 0,
@@ -95,7 +95,7 @@ impl ProfileForm {
         f.rebuild_video_opts();
         f.select_profile(&rec);
         // select_profile() switches to TV-friendly; keep the compat-based choice.
-        f.friendly = f.report.level != CompatLevel::Plays;
+        f.friendly = f.report.needs_tv_friendly();
         f
     }
 

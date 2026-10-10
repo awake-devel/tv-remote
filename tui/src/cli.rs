@@ -363,11 +363,17 @@ fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
 }
 
-/// Open the fleet (reads the config; no network traffic). Without `--config`, a
-/// missing default file starts empty (created by `discover --update` or `tvs add`).
+/// Open the fleet (reads the config; no network traffic). A missing file starts empty
+/// and is created on the first change (`tvs add`, `smartthings app-import`, …), with or
+/// without `--config`; for `--config` a note says so, in case the path has a typo.
 pub fn open_fleet(config: Option<&Path>) -> Result<Fleet, Failure> {
     let r = match config {
-        Some(p) => Fleet::open(p),
+        Some(p) => {
+            if !p.exists() {
+                eprintln!("note: {} does not exist yet; it is created on the first change", p.display());
+            }
+            Fleet::open_or_default(p)
+        }
         None => Fleet::open_default(),
     };
     r.map_err(|e| Failure::new(1, format!("cannot load the config: {e}")))
@@ -667,14 +673,20 @@ fn cmd_tvs(fleet: &Fleet, cmd: TvsCommand, json: bool) -> CliResult {
                             format!("'{host}' is not in the last scan: run `tvs scan` first"),
                         ));
                     }
-                    match Fleet::probe_host(host) {
-                        Some(lan) => {
-                            let c = tvremote_core::fleet::merge_candidates(&fleet.entries(), &[lan], &[]);
-                            fleet.add_candidate(&c[0])?
-                        }
-                        None => {
-                            eprintln!("note: {host} did not answer on port 8001; added anyway");
-                            fleet.add_host(host, None)?
+                    if let Some(e) = fleet.entries().into_iter().find(|e| e.host == host) {
+                        // Already configured: nothing to probe or add (names/--use still apply).
+                        eprintln!("note: {host} is already {} ({})", e.id, e.display_name());
+                        e.id
+                    } else {
+                        match Fleet::probe_host(host) {
+                            Some(lan) => {
+                                let c = tvremote_core::fleet::merge_candidates(&fleet.entries(), &[lan], &[]);
+                                fleet.add_candidate(&c[0])?
+                            }
+                            None => {
+                                eprintln!("note: {host} did not answer on port 8001; added anyway");
+                                fleet.add_host(host, None)?
+                            }
                         }
                     }
                 }
@@ -750,6 +762,9 @@ fn print_scan(r: &tvremote_core::ScanReport) {
     }
     if r.candidates.is_empty() {
         println!("No TV found.");
+        if !r.cloud_checked {
+            println!("(no SmartThings token: LAN only)");
+        }
         return;
     }
     println!(" {:>2}  {:<9} {:<20} {:<15} {:<15} {:<26} KNOWN", "#", "WHERE", "NAME", "IP", "MODEL", "SMARTTHINGS");
@@ -1084,17 +1099,35 @@ fn cmd_smartthings(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
         StCommand::Status => {
             let dev = tv.smartthings_tv()?;
             let s = st.status(&dev.device_id)?;
+            // SmartThings keeps serving the last reported values of an offline TV (e.g.
+            // unplugged): say so, instead of presenting them as the current state.
+            let health = st.health(&dev.device_id).ok();
+            let offline = health.as_ref().is_some_and(|h| !h.is_online());
             if json {
-                print_json(&json!({ "device": to_json(&dev), "status": to_json(&s) }));
+                print_json(&json!({ "device": to_json(&dev), "health": to_json(&health), "status": to_json(&s) }));
                 return Ok(());
             }
             println!("Device        {} ({})", dev.label, dev.device_id);
-            println!(
-                "Power         {}",
-                s.power_on
-                    .map(|b| if b { "on" } else { "off" })
-                    .unwrap_or("–")
-            );
+            match &health {
+                Some(h) if h.is_online() => println!("Cloud         online"),
+                Some(h) => println!(
+                    "Cloud         {}{}: the TV is unreachable (unplugged or no network); the values below are the last it reported",
+                    h.state.to_lowercase(),
+                    h.last_updated.as_deref().map(|d| format!(" since {d}")).unwrap_or_default()
+                ),
+                None => println!("Cloud         ? (health unavailable)"),
+            }
+            if offline {
+                println!("Power         {}", if s.power_on == Some(true) { "on (last known)" } else { "off" });
+            }
+            if !offline {
+                println!(
+                    "Power         {}",
+                    s.power_on
+                        .map(|b| if b { "on" } else { "off" })
+                        .unwrap_or("–")
+                );
+            }
             println!(
                 "Volume        {}",
                 s.volume.map(|v| v.to_string()).unwrap_or("–".into())
@@ -1205,22 +1238,33 @@ pub fn build_mode(
     let mut notes = Vec::new();
     let report = check_compat(info);
     let mut friendly = p.friendly || p.audio.is_some() || p.sub.is_some() || p.reduce.is_some();
-    if !friendly && report.level == CompatLevel::NeedsTvFriendly {
+    // Point at the other languages (one track each), e.g. English on a dubbed remux.
+    let languages = || {
+        let mut langs: Vec<String> = Vec::new();
+        for a in info.audio_streams() {
+            let lang = a.language.clone().unwrap_or_else(|| "und".into());
+            if !langs.iter().any(|l| l.starts_with(&format!("{lang} "))) {
+                langs.push(format!("{lang} --audio {}", a.index));
+            }
+        }
+        (langs.len() > 1).then(|| format!("Audio languages: {}", langs.join(", ")))
+    };
+    if !friendly && report.needs_tv_friendly() {
+        // A direct cast would not play (DTS default track, HEVC in AVI, …).
         friendly = true;
         notes.push("This file needs TV-friendly mode for the TV to play it; using it.".into());
         if p.audio.is_none() {
-            // Point at the other languages (one track each), e.g. English on a dubbed remux.
-            let mut langs: Vec<String> = Vec::new();
-            for a in info.audio_streams() {
-                let lang = a.language.clone().unwrap_or_else(|| "und".into());
-                if !langs.iter().any(|l| l.starts_with(&format!("{lang} "))) {
-                    langs.push(format!("{lang} --audio {}", a.index));
-                }
-            }
-            if langs.len() > 1 {
-                notes.push(format!("Audio languages: {}", langs.join(", ")));
-            }
+            notes.extend(languages());
         }
+    } else if !friendly && report.level == CompatLevel::NeedsTvFriendly {
+        // ⚠ for another reason (an extra DTS track, an untested codec): the default
+        // tracks play as they are, so keep the seekable direct mode.
+        notes.push(
+            "Casting directly: the default tracks should play as they are (see the ! lines); \
+             --friendly or --audio N picks another track."
+                .into(),
+        );
+        notes.extend(languages());
     }
     if report.level == CompatLevel::Unsupported && !force {
         let why = report
@@ -1318,7 +1362,7 @@ fn describe_mode(info: &MediaInfo, mode: &CastMode) -> String {
                 .audio
                 .and_then(|a| info.stream(a))
                 .map(crate::castflow::audio_label)
-                .unwrap_or_else(|| "no audio".into());
+                .unwrap_or_else(|| "none".into());
             let video = crate::castflow::video_label(&p.video);
             let sub = p
                 .subtitle
@@ -1384,11 +1428,13 @@ fn packets_for(info: &MediaInfo, quick: bool) -> Result<Option<PacketProfile>, F
     }
 }
 
-fn print_streams(info: &MediaInfo, emoji: bool) {
+/// `vaapi`: whether a re-encode is possible here (❌ instead of ⚠ when a file needs one
+/// and VAAPI is missing, like the GUI and TUI badges).
+fn print_streams(info: &MediaInfo, emoji: bool, vaapi: bool) {
     let rep = check_compat(info);
     println!(
         "{} {}",
-        compat_badge(rep.effective_level(true), emoji),
+        compat_badge(rep.effective_level(vaapi), emoji),
         info.path.display()
     );
     for s in &info.streams {
@@ -1458,7 +1504,9 @@ fn print_verdict(v: &VerdictOut, emoji: bool) {
             "Capacity  {:.1} Mbps, measured {}{}",
             c.mbps,
             fmt_age(netcheck::now_unix().saturating_sub(c.measured_at)),
-            if v.verdict.capacity_stale {
+            if v.verdict.capacity_stale && v.verdict.capacity_mbps.is_none() {
+                " on another network connection: not used (run `nettest --yes` again)"
+            } else if v.verdict.capacity_stale {
                 " (stale: run `nettest --yes` again)"
             } else {
                 ""
@@ -1503,10 +1551,15 @@ fn cmd_netcheck(tv: &Tv, a: NetcheckArgs, json: bool) -> CliResult {
     let info = tv.probe_media(&a.file)?;
     let (mode, notes) = build_mode(&info, &a.profile, &vaapi_available, true)?;
     let v = compute_verdict(tv, &info, &mode, a.profile.quick)?;
+    let report = check_compat(&info);
+    // The VAAPI probe is slow (~1 s, cached): only needed when the file needs a re-encode.
+    let vaapi = report.needs_video_reencode && vaapi_available();
     if json {
         print_json(&json!({
             "file": info.path,
-            "compat": to_json(&check_compat(&info)),
+            "compat": to_json(&report),
+            "compat_level": to_json(&report.effective_level(vaapi)),
+            "vaapi": vaapi,
             "mode": to_json(&mode),
             "demand": to_json(&v.demand),
             "verdict": to_json(&v.verdict),
@@ -1515,7 +1568,7 @@ fn cmd_netcheck(tv: &Tv, a: NetcheckArgs, json: bool) -> CliResult {
         }));
         return Ok(());
     }
-    print_streams(&info, emoji);
+    print_streams(&info, emoji, vaapi);
     for n in notes {
         println!("note: {n}");
     }
@@ -2006,5 +2059,22 @@ mod tests {
         assert_eq!(p.video, VideoMode::Reduce { target_mbps: 30.0 });
         assert_eq!(profile_flags(&p), "--audio 1 --reduce 30");
         assert_eq!(profile_flags(&CastProfile::default()), "--friendly");
+    }
+
+    #[test]
+    fn an_extra_dts_track_does_not_force_tv_friendly() {
+        // Default AC3 (French) plus a non-default DTS (English): ⚠, but the default
+        // tracks play directly, so the seekable direct mode is kept (as in the GUI).
+        let mut info = remux();
+        info.streams[1].default = false;
+        info.streams[2].default = true;
+        assert_eq!(check_compat(&info).level, CompatLevel::NeedsTvFriendly);
+        let (m, notes) = build_mode(&info, &ProfileArgs::default(), &|| false, false).unwrap();
+        assert!(matches!(m, CastMode::Direct), "{m:?}");
+        assert!(notes[0].starts_with("Casting directly"), "{notes:?}");
+        assert!(notes.iter().any(|n| n.contains("eng --audio 1")), "{notes:?}");
+        // Asking for the DTS track switches to TV-friendly (converted to AC3).
+        let (m, _) = build_mode(&info, &ProfileArgs { audio: Some(1), ..Default::default() }, &|| false, false).unwrap();
+        assert!(matches!(m, CastMode::TvFriendly(ref p) if p.audio == Some(1)));
     }
 }

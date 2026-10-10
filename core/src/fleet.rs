@@ -830,6 +830,10 @@ impl Fleet {
         }
         let name = name.map(str::to_string).unwrap_or_else(|| format!("Samsung TV ({host})"));
         let id = self.inner.config.update_app(move |a| {
+            // Check again on the file's current contents (another process may have added it).
+            if let Some(e) = a.tvs.iter().find(|e| e.host == host) {
+                return e.id.clone();
+            }
             let id = a.next_id();
             a.tvs.push(TvEntry::new(&id, &name, &host));
             if a.active.is_none() {

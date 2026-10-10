@@ -26,6 +26,15 @@ user_systemctl() {
     systemctl --user "$@" >/dev/null 2>&1
 }
 
+# True when the systemd user manager loads the timer from *our* ${unit_dir}. With a HOME
+# or XDG_CONFIG_HOME that differs from the session's (e.g. HOME=$(mktemp -d) to try the
+# script), `systemctl --user` would otherwise enable or disable the session's own timer.
+unit_is_ours() {
+    local frag
+    frag=$(systemctl --user show -P FragmentPath "${timer_name}.timer" 2>/dev/null) || return 1
+    [[ -n ${frag} && ${frag} -ef "${unit_dir}/${timer_name}.timer" ]]
+}
+
 refresh_desktop_db() {
     if command -v update-desktop-database >/dev/null 2>&1; then
         update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
@@ -69,25 +78,37 @@ RandomizedDelaySec=1h
 WantedBy=timers.target
 EOF
     echo "==> Installed ${unit_dir}/${timer_name}.{service,timer}"
-    if user_systemctl daemon-reload && user_systemctl enable --now "${timer_name}.timer"; then
-        echo "==> Enabled ${timer_name}.timer (daily)"
-    else
+    if ! systemctl --user show -P FragmentPath "${timer_name}.timer" >/dev/null 2>&1; then
         echo "note: could not reach the systemd user manager; enable the timer later with:"
         echo "      systemctl --user daemon-reload && systemctl --user enable --now ${timer_name}.timer"
+    elif ! unit_is_ours && ! { user_systemctl daemon-reload && unit_is_ours; }; then
+        echo "note: the systemd user manager does not load units from ${unit_dir}"
+        echo "      (HOME or XDG_CONFIG_HOME differs from your session's), so the timer was not enabled."
+    else
+        # Pick up the rewritten unit files, then enable.
+        user_systemctl daemon-reload || true
+        if user_systemctl enable --now "${timer_name}.timer"; then
+            echo "==> Enabled ${timer_name}.timer (daily)"
+        else
+            echo "note: could not enable the timer; try: systemctl --user enable --now ${timer_name}.timer"
+        fi
     fi
 }
 
 uninstall() {
-    if command -v systemctl >/dev/null 2>&1; then
+    local ours=0
+    if command -v systemctl >/dev/null 2>&1 && unit_is_ours; then
+        ours=1
         user_systemctl disable --now "${timer_name}.timer" || true
     fi
-    for f in "${unit_dir}/${timer_name}.timer" "${unit_dir}/${timer_name}.service"; do
-        if [[ -e ${f} ]]; then
+    for f in "${unit_dir}/${timer_name}.timer" "${unit_dir}/${timer_name}.service" \
+        "${unit_dir}/timers.target.wants/${timer_name}.timer"; do
+        if [[ -e ${f} || -L ${f} ]]; then
             rm -f -- "${f}"
             echo "==> Removed ${f}"
         fi
     done
-    if command -v systemctl >/dev/null 2>&1; then
+    if ((ours)); then
         user_systemctl daemon-reload || true
     fi
     for b in "${binaries[@]}"; do

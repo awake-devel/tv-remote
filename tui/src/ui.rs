@@ -619,7 +619,11 @@ fn draw_verdict(f: &mut Frame, app: &mut App, area: Rect) {
                     ];
                     if b.verdict.capacity_stale {
                         spans.push(Span::styled(
-                            " (stale: press n to re-run the network test)",
+                            if b.verdict.capacity_mbps.is_none() {
+                                " on another network connection, not used (press n to re-run the network test)"
+                            } else {
+                                " (stale: press n to re-run the network test)"
+                            },
                             Style::new().fg(Color::Yellow),
                         ));
                     }

@@ -124,7 +124,7 @@ What SmartThings offers depends on the TV model. TV Remote only shows what your 
 |---|---|---|
 | Power on and off | `on`, `off` | reliable; used together with Wake-on-LAN |
 | Volume and mute | `volume`, `mute` | reliable; used when the LAN doesn't answer |
-| Status (power, volume, input, modes) | `smartthings status` | reliable |
+| Status (power, volume, input, modes) | `smartthings status` | reliable; when the TV is offline (unplugged, no network), it says so, and the values shown are the last ones the TV reported |
 | Input source | `smartthings input HDMI1` | by id or name, any case |
 | Picture mode | `smartthings picture-mode movie` | see the limitation below |
 | Sound mode | `smartthings sound-mode standard` | see the limitation below |

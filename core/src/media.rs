@@ -418,7 +418,9 @@ pub fn probe(path: &Path) -> Result<MediaInfo> {
 pub enum CompatLevel {
     /// ✅ Plays as-is.
     Plays,
-    /// ⚠ Needs TV-friendly mode (audio conversion, remux, or video re-encode).
+    /// ⚠ Needs TV-friendly mode for some track (audio conversion, remux, or video
+    /// re-encode), or uses a format that was not tested on the TV. Whether a *direct*
+    /// cast of the default tracks still works is [`CompatReport::needs_tv_friendly`].
     NeedsTvFriendly,
     /// ❌ Cannot be played even with TV-friendly mode.
     Unsupported,
@@ -472,6 +474,14 @@ impl CompatReport {
         } else {
             self.level
         }
+    }
+
+    /// True when a direct cast would not play (the default audio must be converted, the
+    /// container remuxed, or the video re-encoded): start in TV-friendly mode. A ⚠ file
+    /// can still be fine directly, e.g. an extra non-default DTS track or an untested
+    /// codec; then this is false.
+    pub fn needs_tv_friendly(&self) -> bool {
+        self.needs_audio_conversion || self.needs_remux || self.needs_video_reencode
     }
 
     /// Badge text: `✅`, `⚠` or `❌`.
@@ -676,9 +686,11 @@ pub fn check_compat(info: &MediaInfo) -> CompatReport {
     }
 
     issues.sort_by_key(|i| std::cmp::Reverse(i.severity));
+    // ⚠ also covers formats that were not tested on the TV (warnings), as the badge
+    // legend promises; they do not force TV-friendly mode (see `needs_tv_friendly`).
     let level = if issues.iter().any(|i| i.severity == Severity::Problem && !i.fixable) {
         CompatLevel::Unsupported
-    } else if issues.iter().any(|i| i.severity == Severity::Problem) {
+    } else if issues.iter().any(|i| i.severity >= Severity::Warning) {
         CompatLevel::NeedsTvFriendly
     } else {
         CompatLevel::Plays
@@ -956,6 +968,12 @@ pub fn ffmpeg_args(
         }
         VideoMode::Copy => None,
     };
+    if info.container() == Container::Avi {
+        // AVI packets carry no timestamps (B-frames, packed bitstreams): without
+        // generated PTS the Matroska and MPEG-TS muxers refuse them ("Can't write packet
+        // with unknown timestamp"), which broke the remux this mode exists for.
+        a.extend(["-fflags".into(), "+genpts".into()]);
+    }
     a.push("-i".into());
     a.push(input.display().to_string());
 
@@ -1319,5 +1337,44 @@ pub(crate) mod tests {
         assert_eq!(reduce_output_size(7680, 4320), Some((3840, 2160)));
         assert_eq!(reduce_output_size(4096, 2160), Some((3840, 2026)));
         assert_eq!(reduce_output_size(3840, 1600), None);
+        assert!(!s.contains("genpts"), "only AVI input needs generated timestamps");
+    }
+
+    #[test]
+    fn avi_input_gets_generated_timestamps() {
+        // HEVC (or Xvid with B-frames) in AVI: the remux failed without +genpts.
+        let mut m = interstellar();
+        m.format_name = "avi".into();
+        let p = CastProfile::recommended(&m, false);
+        let s = ffmpeg_args(Path::new("/in.avi"), &m, &p, None).unwrap().join(" ");
+        assert!(s.contains("-fflags +genpts -i /in.avi"), "{s}");
+    }
+
+    #[test]
+    fn untested_formats_are_flagged_but_do_not_force_tv_friendly() {
+        let base = |video: &str, audio: &str, format: &str| {
+            let json = format!(
+                r#"{{"streams":[
+                  {{"index":0,"codec_type":"video","codec_name":"{video}","width":1280,"height":720,"avg_frame_rate":"25/1"}},
+                  {{"index":1,"codec_type":"audio","codec_name":"{audio}","channels":2,"disposition":{{"default":1}}}}],
+                  "format":{{"format_name":"{format}","duration":"10","size":"1000000"}}}}"#
+            );
+            check_compat(&parse_ffprobe(&json, Path::new("x")).unwrap())
+        };
+        let ok = base("h264", "aac", "mov,mp4,m4a,3gp,3g2,mj2");
+        assert_eq!((ok.level, ok.needs_tv_friendly()), (CompatLevel::Plays, false));
+        // Untested video codec / audio codec: ⚠, as the badge legend says, but direct is fine.
+        for r in [base("mpeg2video", "mp2", "mpeg"), base("h264", "truehd", "matroska,webm")] {
+            assert_eq!(r.level, CompatLevel::NeedsTvFriendly, "{:?}", r.issues);
+            assert!(!r.needs_tv_friendly());
+        }
+        // DTS default track: ⚠ and TV-friendly is needed.
+        let dts = base("h264", "dts", "matroska,webm");
+        assert_eq!(dts.level, CompatLevel::NeedsTvFriendly);
+        assert!(dts.needs_tv_friendly());
+        // A non-default DTS track next to a default AC3 one: ⚠, direct still plays.
+        let r = check_compat(&interstellar());
+        assert_eq!(r.level, CompatLevel::NeedsTvFriendly);
+        assert!(!r.needs_tv_friendly());
     }
 }

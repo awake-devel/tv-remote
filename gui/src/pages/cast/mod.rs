@@ -389,7 +389,7 @@ impl CastPage {
         }
         self.file_row.set_subtitle(&glib::markup_escape_text(&sub));
 
-        let tv_friendly = report.needs_audio_conversion || report.needs_remux || report.needs_video_reencode;
+        let tv_friendly = report.needs_tv_friendly();
         // Until the VAAPI probe answers, recommend copying; `on_vaapi` upgrades to a
         // reduced profile if the file needs a re-encode and VAAPI turns out to work.
         let vaapi = c.vaapi.get() == Some(true);
@@ -606,8 +606,9 @@ impl CastPage {
                     return;
                 };
                 let mode = self.current_mode();
-                let direct_problem = matches!(mode, CastMode::Direct)
-                    && sel.report.level != tvremote_core::CompatLevel::Plays;
+                // Only when the direct cast would not play (not for an untested codec or an
+                // extra DTS track next to a playable default one).
+                let direct_problem = matches!(mode, CastMode::Direct) && sel.report.needs_tv_friendly();
                 Some((
                     CastRequest {
                         source: CastSource::File(sel.info.path.clone()),

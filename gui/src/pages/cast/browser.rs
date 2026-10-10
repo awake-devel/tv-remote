@@ -50,10 +50,13 @@ pub fn places() -> Vec<Place> {
     let videos = glib::user_special_dir(glib::UserDirectory::Videos)
         .unwrap_or_else(|| home.join("Vidéos"));
     push(dir_label(&videos, "Videos"), videos);
+    // Fallbacks when xdg-user-dirs is not set up (English and French names).
+    push("Videos".into(), home.join("Videos"));
     push("Vidéos".into(), home.join("Vidéos"));
     let dl = glib::user_special_dir(glib::UserDirectory::Downloads)
         .unwrap_or_else(|| home.join("Téléchargements"));
     push(dir_label(&dl, "Downloads"), dl);
+    push("Downloads".into(), home.join("Downloads"));
     push("Téléchargements".into(), home.join("Téléchargements"));
     push("Home".into(), home.clone());
     let user = glib::user_name().to_string_lossy().to_string();
@@ -452,7 +455,9 @@ impl Browser {
             } else {
                 row.set_subtitle(&human_size(e.size));
                 row.add_suffix(&badge);
-                if matches!(e.kind, Some(MediaKind::Video | MediaKind::Audio)) {
+                // Images too: ffprobe is instant on them, and GIF/WebP/HEIC must show ❌
+                // here rather than only after being picked.
+                if e.kind.is_some() {
                     to_probe.push(e.clone());
                 }
             }

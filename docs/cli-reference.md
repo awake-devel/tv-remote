@@ -16,7 +16,7 @@ These work with every command.
 |---|---|
 | `--tv <NAME\|ID>` | control this TV instead of the active one: id, name, IP address or unique prefix (see `tvs list`) |
 | `--json` | JSON output, for `info`, `status`, `apps`, `netcheck`, `discover`, `smartthings` and `tvs` |
-| `--config <PATH>` | use another config file (default `~/.config/samsung-tv/config.json`) |
+| `--config <PATH>` | use another config file (default `~/.config/samsung-tv/config.json`); like the default, a missing file starts empty and is created on the first change |
 | `-h`, `--help` | help |
 | `-V`, `--version` | version |
 
@@ -74,7 +74,7 @@ Common keys:
 | Command | Description | Example |
 |---|---|---|
 | `cast <FILE\|URL>` | cast a file or an http(s) URL; stays attached until playback ends (Ctrl-C stops it) | `tv-remote-tui cast film.mkv` |
-| `netcheck <FILE>` | list the tracks, the compatibility, the network demand, the verdict and fixes | `tv-remote-tui netcheck film.mkv` |
+| `netcheck <FILE>` | list the tracks, the compatibility, the network demand, the verdict and fixes; nothing is cast, it only asks the TV (one local request) whether it is wired or on Wi-Fi | `tv-remote-tui netcheck film.mkv` |
 | `nettest --yes` | measure the network capacity (plays a test pattern on the TV for about 10 s) | `tv-remote-tui nettest --yes` |
 | `pause` | pause the TV's media player | `tv-remote-tui pause` |
 | `play` | resume playback | `tv-remote-tui play` |
@@ -147,6 +147,7 @@ See [Several TVs](multiple-tvs.md).
 | 1 | error: TV unreachable, timeout, config problem, SmartThings error… |
 | 2 | usage error: bad arguments, unknown key or TV, `nettest` without `--yes` |
 | 3 | refused: the network verdict is ❌ or the file is unsupported (add `--force`), or a re-encode needs VAAPI |
+| 4 | the SmartThings login expired: run `smartthings login` again (the daily refresh timer does not retry on this code) |
 | 130 | interrupted with Ctrl-C |
 
 Ctrl-C stops a running command cleanly: a cast stops playback, and a network test stops the test pattern. Press Ctrl-C a second time to exit at once.

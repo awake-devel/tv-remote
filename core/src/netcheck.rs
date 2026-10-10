@@ -746,11 +746,16 @@ impl CapacityMeasurement {
     /// Stale if older than 24 h or measured on a different link.
     pub fn is_stale(&self, now_unix: u64, current: Option<&LinkInfo>) -> bool {
         let old = now_unix.saturating_sub(self.measured_at) > CAPACITY_MAX_AGE.as_secs();
-        let changed = match (current, &self.link_signature) {
+        old || self.measured_on_other_link(current)
+    }
+
+    /// Measured on another link than `current` (e.g. wired, and this PC is now on
+    /// Wi-Fi): the figure says nothing about the current path. Unknown either way = false.
+    pub fn measured_on_other_link(&self, current: Option<&LinkInfo>) -> bool {
+        match (current, &self.link_signature) {
             (Some(l), Some(sig)) => &l.signature() != sig,
             _ => false,
-        };
-        old || changed
+        }
     }
 }
 
@@ -1029,7 +1034,8 @@ pub struct Verdict {
     pub fixes: Vec<Fix>,
     /// Peak demand used (Mbit/s).
     pub demand_mbps: f64,
-    /// Capacity used (Mbit/s), if measured.
+    /// Capacity used (Mbit/s), if measured. `None` when the only measurement was made on
+    /// another network link (it says nothing about this one, so it is not used).
     pub capacity_mbps: Option<f64>,
     /// The capacity measurement is stale (> 24 h or another link).
     pub capacity_stale: bool,
@@ -1077,7 +1083,9 @@ pub fn level_for(stats: &WindowStats, capacity_mbps: Option<f64>, tv: Option<TvN
 }
 
 /// The verdict shown before casting. Pure except for reading the clock to decide
-/// whether `capacity` is stale (a stale measurement is still used, but flagged).
+/// whether `capacity` is stale (an old measurement on the same link is still used, but
+/// flagged; one made on another link is not used at all: a wired measurement says
+/// nothing about this PC's Wi-Fi).
 ///
 /// `link` is this PC's link ([`detect_link`]); `tv` is how the TV is connected
 /// ([`crate::DeviceInfo::tv_network`]), `None` if unknown. Without a capacity
@@ -1089,7 +1097,8 @@ pub fn verdict(
     link: Option<&LinkInfo>,
     tv: Option<TvNetwork>,
 ) -> Verdict {
-    let cap = capacity.map(|c| c.mbps);
+    let other_link = capacity.filter(|c| c.measured_on_other_link(link));
+    let cap = capacity.filter(|_| other_link.is_none()).map(|c| c.mbps);
     let stale = capacity.is_some_and(|c| c.is_stale(now_unix(), link));
     let level = level_for(&demand.stats, cap, tv);
     let p10 = demand.peak_mbps();
@@ -1107,7 +1116,13 @@ pub fn verdict(
             ex.push_str(if stale { "; measurement is stale, re-run the network test)." } else { ")." });
         }
         None => {
-            ex.push_str(" Network capacity not measured yet: run the network test.");
+            match other_link {
+                Some(o) => ex.push_str(&format!(
+                    " The last network test ({:.1} Mbps) was run on another network connection, so it is not used: run the network test again.",
+                    o.mbps
+                )),
+                None => ex.push_str(" Network capacity not measured yet: run the network test."),
+            }
             let (bad, _) = unmeasured_thresholds(tv);
             ex.push_str(&match tv {
                 Some(TvNetwork::Wireless) => format!(
@@ -1140,7 +1155,9 @@ pub fn verdict(
         (false, Some(TvNetwork::Wired)) if link.is_some() => ex.push_str(" The TV is wired too."),
         _ => {}
     }
-    if let Some(r) = link.filter(|l| l.wireless).and_then(|l| l.tx_mbps.or(l.rx_mbps)) {
+    // A fresh measurement beats the rule of thumb below (which could contradict it).
+    let measured_fresh = cap.is_some() && !stale;
+    if let Some(r) = link.filter(|l| l.wireless && !measured_fresh).and_then(|l| l.tx_mbps.or(l.rx_mbps)) {
         // Rule of thumb: usable TCP throughput ≈ half the PHY rate, halved again when
         // the TV is on Wi-Fi too (through the AP twice).
         let usable = match tv {
@@ -1297,6 +1314,42 @@ mod tests {
         let link = LinkInfo { iface: "wlan0".into(), wireless: true, bssid: Some("aa".into()), freq_mhz: Some(5180.0), ..Default::default() };
         let c2 = CapacityMeasurement { link_signature: Some("wlan0|bb|5 GHz".into()), ..cap(100.0) };
         assert!(c2.is_stale(now_unix(), Some(&link)));
+    }
+
+    #[test]
+    fn a_capacity_measured_on_another_link_is_not_used() {
+        // Measured at 157 Mbps over Ethernet; the PC is now on a 58 Mbit/s Wi-Fi link.
+        let m = interstellar();
+        let mut d = compute_demand(&m, &CastMode::Direct, None);
+        d.stats = WindowStats { avg_bps: 96_000_000, peak_2s_bps: 102_000_000, peak_10s_bps: 96_000_000 };
+        d.provisional = false;
+        let wifi = LinkInfo {
+            iface: "wlan0".into(),
+            wireless: true,
+            bssid: Some("aa".into()),
+            freq_mhz: Some(5180.0),
+            tx_mbps: Some(58.0),
+            ..Default::default()
+        };
+        let wired = CapacityMeasurement { link_signature: Some("enp0s20f0u2u3|wired".into()), ..cap(157.5) };
+        let v = verdict(&d, Some(&wired), Some(&wifi), None);
+        assert_eq!(v.level, VerdictLevel::Bad, "{}", v.explanation);
+        assert_eq!(v.capacity_mbps, None);
+        assert!(v.capacity_stale);
+        assert!(v.explanation.contains("another network connection"), "{}", v.explanation);
+        assert!(!v.explanation.contains("Should play smoothly"));
+        // The same measurement on the current link is used, and the PHY rule of thumb
+        // (which would contradict a fresh measurement) is left out.
+        let here = CapacityMeasurement { link_signature: Some(wifi.signature()), ..cap(157.5) };
+        let v = verdict(&d, Some(&here), Some(&wifi), None);
+        assert_eq!(v.level, VerdictLevel::Ok);
+        assert_eq!(v.capacity_mbps, Some(157.5));
+        assert!(!v.explanation.contains("PHY rate typically"), "{}", v.explanation);
+        // An old measurement on the same link is still used, but flagged.
+        let old = CapacityMeasurement { measured_at: now_unix() - 25 * 3600, ..here };
+        let v = verdict(&d, Some(&old), Some(&wifi), None);
+        assert_eq!(v.capacity_mbps, Some(157.5));
+        assert!(v.capacity_stale && v.explanation.contains("stale"));
     }
 
     #[test]

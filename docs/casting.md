@@ -34,7 +34,7 @@ Use **direct** when the file plays as-is. Use **TV-friendly** when:
 - the file has many audio tracks and your network struggles (TV-friendly sends only one);
 - the video bitrate is too high for the TV or your network, and you have VAAPI.
 
-On the command line, `--friendly` selects TV-friendly mode. `--audio`, `--sub` and `--reduce` imply it. If a file needs TV-friendly mode (for example DTS audio), the command switches to it on its own and tells you.
+On the command line, `--friendly` selects TV-friendly mode. `--audio`, `--sub` and `--reduce` imply it. If a file needs TV-friendly mode (for example DTS as the default audio track, or HEVC in an AVI file), the command switches to it on its own and tells you. A ⚠ file whose default tracks play as they are (an extra DTS track next to an AC3 one, or a codec that wasn't tested) is cast directly, so you can still seek; pick another track with `--audio`.
 
 ## Compatibility badges
 
@@ -115,7 +115,7 @@ Only the tracks that are actually sent count. In TV-friendly mode, a re-encoded 
 - It plays a noise test pattern on the TV for about 10 seconds. Whatever is playing on the TV is interrupted.
 - The first run encodes a 20-second, 150 Mbit/s test clip (about 375 MB, stored in `~/.cache/tv-remote/`). That takes about a minute.
 - You can cancel at any time. The test pattern stops and nothing is saved.
-- The result is considered stale after 24 hours, or when your PC connects to another Wi-Fi network. Test again then.
+- The result is considered stale after 24 hours, or when your PC connects to another network (another Wi-Fi network, or Wi-Fi instead of a cable). Test again then. A result measured on another connection isn't used for the verdict at all: the defaults below apply until you test again.
 
 ```sh
 tv-remote-tui nettest --yes

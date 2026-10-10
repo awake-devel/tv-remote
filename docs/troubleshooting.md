@@ -164,7 +164,7 @@ If your network is split, you can still add the TV by IP address (`tvs add <ip>`
 
 ## The config file is broken
 
-If `~/.config/samsung-tv/config.json` can't be read, TV Remote never overwrites it. The desktop app shows a warning and runs without saving. Fix the JSON, or move the file away to start over:
+If `~/.config/samsung-tv/config.json` can't be read, TV Remote never overwrites it. The desktop app shows a warning and runs without saving. If the file breaks while an app is running (for example after a hand edit), saving fails with an error instead of overwriting it. Fix the JSON, or move the file away to start over:
 
 ```sh
 mv ~/.config/samsung-tv/config.json ~/.config/samsung-tv/config.json.bak

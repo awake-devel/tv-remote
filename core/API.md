@@ -145,7 +145,8 @@ tv.youtube("https://youtu.be/dQw4w9WgXcQ")?;    // DIAL
 ```rust
 use tvremote_core::cast::*;                       // MediaInfo, check_compat, CastProfile, ...
 let info = tv.probe_media(&path)?;                // ffprobe (< 1 s); cache it in the browser
-let report = check_compat(&info);                 // report.badge() ✅/⚠/❌; report.issues
+let report = check_compat(&info);                 // report.badge() ✅/⚠/❌; report.issues (⚠ also = untested format)
+let start_friendly = report.needs_tv_friendly();  // default mode: true only if a direct cast would not play
 let vaapi = vaapi_available();                    // slow first call (~1 s), cached; worker thread!
 let level = report.effective_level(vaapi);        // re-encode needed + no VAAPI → Unsupported
 
@@ -249,8 +250,9 @@ let s: AuthStatus = auth.status(); // method (OAuth/Pat/None), app_imported, con
 - **Single-use refresh tokens.** Each refresh returns a new pair and invalidates the old refresh token *and* the current
   access token. Refreshes are serialized by a process-wide mutex plus an exclusive `flock` on `config.json.lock`
   (`SharedConfig::with_oauth_locked`); the config is re-read inside the lock (another process may have rotated the pair)
-  and the new pair is saved before the access token is used. Every other config save also takes the lock and adopts the
-  file's `smartthings_oauth` first, so a long-running GUI never writes back a stale pair.
+  and the new pair is saved before the access token is used. Every other config save also takes the lock and re-reads the
+  whole file before applying its change (a read-modify-write), so a long-running GUI never writes back a stale pair, nor
+  drops TVs or settings another process changed; a file that no longer parses is never overwritten (the save fails).
 - Every SmartThings call in core goes through `bearer()`; on HTTP 401 the client calls `after_unauthorized(used)` (adopts a
   token another process stored, else refreshes) and retries once.
 - Token endpoint: `POST https://api.smartthings.com/oauth/token`, form body, HTTP Basic `client_id:client_secret`. Pure,

@@ -94,6 +94,7 @@ Next step: [connect to your TV](first-connection.md).
 | `~/.local/bin/tv-remote` | desktop app |
 | `~/.local/bin/tv-remote-tui` | terminal UI and command line |
 | `~/.local/share/applications/tv-remote.desktop` | "TV Remote" launcher entry |
+| `~/.config/systemd/user/tv-remote-st-refresh.{service,timer}` | daily [SmartThings](smartthings.md) login refresh, enabled by the script; it does nothing until you set up SmartThings |
 
 TV Remote creates these when you use it:
 
@@ -103,7 +104,7 @@ TV Remote creates these when you use it:
 | `~/.config/samsung-tv/` (other files) | SmartThings app registration and tokens, if you set it up |
 | `~/.cache/tv-remote/` | file analysis cache, network test clip (about 375 MB), last scan, ffmpeg log |
 
-If you use [SmartThings](smartthings.md), a systemd user timer named `tv-remote-st-refresh.timer` also keeps its login alive.
+If you use [SmartThings](smartthings.md), the systemd user timer `tv-remote-st-refresh.timer` keeps its login alive.
 
 `$XDG_CONFIG_HOME`, `$XDG_DATA_HOME` and `$XDG_CACHE_HOME` are respected if you set them.
 
@@ -119,26 +120,29 @@ The script rebuilds and overwrites the installed copies. Your config and pairing
 
 ## Uninstall
 
-1. Remove the programs and the launcher entry:
+1. Remove the programs, the launcher entry and the refresh timer:
 
    ```sh
+   cd tv-remote
+   ./install.sh --uninstall
+   ```
+
+   Without the source folder, do the same by hand:
+
+   ```sh
+   systemctl --user disable --now tv-remote-st-refresh.timer
+   rm ~/.config/systemd/user/tv-remote-st-refresh.service ~/.config/systemd/user/tv-remote-st-refresh.timer
    rm ~/.local/bin/tv-remote ~/.local/bin/tv-remote-tui
    rm ~/.local/share/applications/tv-remote.desktop
    ```
 
-2. If you set up SmartThings, stop the refresh timer:
-
-   ```sh
-   systemctl --user disable --now tv-remote-st-refresh.timer
-   ```
-
-3. Optional: delete your settings, tokens and cache:
+2. Optional: delete your settings, tokens and cache:
 
    ```sh
    rm -r ~/.config/samsung-tv ~/.cache/tv-remote
    ```
 
-4. Optional: on the TV, remove the PC from the list of allowed devices (see [First connection](first-connection.md#4-ask-only-the-first-time)). If you used SmartThings, you can also delete the app you registered: `npx --yes @smartthings/cli apps` lists it, and `apps:delete` removes it.
+3. Optional: on the TV, remove the PC from the list of allowed devices (see [First connection](first-connection.md#4-ask-only-the-first-time)). If you used SmartThings, you can also delete the app you registered: `npx --yes @smartthings/cli apps` lists it, and `apps:delete` removes it.
 
 ## Terminal UI only
 

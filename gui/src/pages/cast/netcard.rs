@@ -19,6 +19,8 @@ pub struct CapInfo {
     pub cap: Option<CapacityMeasurement>,
     pub age_secs: u64,
     pub stale: bool,
+    /// Measured on another network link: the verdict does not use it at all.
+    pub other_link: bool,
     pub link: Option<LinkInfo>,
     /// How the TV is connected (from the cached device info), `None` if unknown.
     pub tv: Option<TvNetwork>,
@@ -29,11 +31,15 @@ pub fn load_cap_info(tv: Option<TvNetwork>) -> CapInfo {
     let link = netcheck::detect_link();
     let cap = netcheck::load_capacity();
     let now = netcheck::now_unix();
-    let (age_secs, stale) = match &cap {
-        Some(c) => (now.saturating_sub(c.measured_at), c.is_stale(now, link.as_ref())),
-        None => (0, false),
+    let (age_secs, stale, other_link) = match &cap {
+        Some(c) => (
+            now.saturating_sub(c.measured_at),
+            c.is_stale(now, link.as_ref()),
+            c.measured_on_other_link(link.as_ref()),
+        ),
+        None => (0, false, false),
     };
-    CapInfo { cap, age_secs, stale, link, tv }
+    CapInfo { cap, age_secs, stale, other_link, link, tv }
 }
 
 pub struct NetCard {
@@ -173,8 +179,10 @@ impl NetCard {
                     fmt_age(c.age_secs),
                     fmt_mbps(m.peak_mbps)
                 );
-                if c.stale {
-                    t.push_str(" · stale: older than 24 h or another Wi-Fi link, test again");
+                if c.other_link {
+                    t.push_str(" · on another network connection, so not used: test again");
+                } else if c.stale {
+                    t.push_str(" · stale: older than 24 h, test again");
                 }
                 t
             }
