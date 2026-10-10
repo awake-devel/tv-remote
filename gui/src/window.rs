@@ -146,7 +146,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
     load_css();
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("TV du salon")
+        .title("TV Remote")
         .default_width(1180)
         .default_height(820)
         .width_request(360)
@@ -220,7 +220,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
             .child(&list)
             .build(),
     ));
-    let sidebar_page = adw::NavigationPage::new(&sidebar_tv, "TV du salon");
+    let sidebar_page = adw::NavigationPage::new(&sidebar_tv, "TV Remote");
 
     // --- content + header status ------------------------------------------------------------
     let content_tv = adw::ToolbarView::new();

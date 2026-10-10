@@ -79,7 +79,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let name = app.tv.display_name();
     let others = app.tv_list.len().saturating_sub(1);
     let mut title = vec![
-        format!(" {} ", if name.is_empty() { "TV du salon".to_string() } else { name }).bold().fg(ACCENT),
+        format!(" {} ", if name.is_empty() { "TV Remote".to_string() } else { name }).bold().fg(ACCENT),
         format!("· {} ", if app.host.is_empty() { "cloud only" } else { &app.host }).into(),
     ];
     if others > 0 {

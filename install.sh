@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and install "TV du salon" (tv-remote GUI + tv-remote-tui) for the current user.
+# Build and install "TV Remote" (tv-remote GUI + tv-remote-tui) for the current user.
 # No sudo; safe to run again (it rebuilds and overwrites the installed copies).
 set -euo pipefail
 
@@ -46,4 +46,4 @@ case ":${PATH}:" in
     *) echo "note: ${bin_dir} is not in your PATH; add it to run tv-remote / tv-remote-tui by name" ;;
 esac
 
-echo "Done. Launch \"TV du salon\" from the app launcher, or run tv-remote / tv-remote-tui."
+echo "Done. Launch \"TV Remote\" from the app launcher, or run tv-remote / tv-remote-tui."

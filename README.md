@@ -1,4 +1,4 @@
-# tv-remote — TV du salon
+# tv-remote
 
 Remote control for Samsung Tizen TVs on Linux: a GTK4/libadwaita app (`tv-remote`) and a terminal UI + CLI (`tv-remote-tui`), built on a shared Rust core.
 
@@ -16,7 +16,7 @@ Remote control for Samsung Tizen TVs on Linux: a GTK4/libadwaita app (`tv-remote
 Requires Rust, GTK 4 and libadwaita, and ffmpeg/ffprobe for casting.
 
 ```sh
-./install.sh   # builds in release mode, installs to ~/.local/bin and adds the "TV du salon" launcher
+./install.sh   # builds in release mode, installs to ~/.local/bin and adds the "TV Remote" launcher
 ```
 
 ## Usage

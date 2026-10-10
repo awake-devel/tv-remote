@@ -1,4 +1,4 @@
-//! TV du salon: GTK4 / libadwaita remote control for the living-room Samsung TV.
+//! TV Remote: GTK4 / libadwaita remote control for the living-room Samsung TV.
 //!
 //! All TV work goes through `tvremote_core` on worker threads (see [`ctx`]); the GTK
 //! main loop never blocks.
