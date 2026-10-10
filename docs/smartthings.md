@@ -62,14 +62,14 @@ tv-remote-tui smartthings login
 1. Your browser opens the Samsung login page. Log in.
 2. Choose the **location** (home) that contains your TV.
 3. Approve the access.
+4. The browser lands on an **httpbin.org** page showing some JSON. Its address contains `code=…`.
+5. Paste that address (or just the code) into the terminal and press Enter.
 
-The browser then returns to a small local page on port 47811, and the command says you're logged in.
+The command then says you're connected. The code is single-use, expires after about 5 minutes, and is useless without your app's secret, which stays on your PC.
 
-If port 47811 is already in use on your PC, or the browser runs on another machine, use the paste mode and follow its instructions:
+In the app: **Device** page → SmartThings → **Connect SmartThings**, then paste the address into the dialog.
 
-```sh
-tv-remote-tui smartthings login --paste
-```
+> **Why paste?** SmartThings answers *"403 Access forbidden to this app"* for apps that redirect to `localhost` on some accounts, so the httpbin redirect is the default. To try the automatic local redirect anyway: `tv-remote-tui smartthings login --local`.
 
 ### 5. Keep the login alive
 

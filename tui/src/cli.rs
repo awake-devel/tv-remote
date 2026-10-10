@@ -233,12 +233,17 @@ pub enum StCommand {
         /// Output file of `apps:create` (default: ~/.config/samsung-tv/st-app-created.json).
         file: Option<PathBuf>,
     },
-    /// Log in to SmartThings (OAuth): opens the browser and waits for the redirect on
-    /// 127.0.0.1:47811 (falls back to pasting the URL if the port is busy).
+    /// Log in to SmartThings (OAuth): opens the browser; after approving, paste the
+    /// httpbin.org address it lands on (or just the code).
     Login {
-        /// Paste the redirected URL (httpbin.org) instead of listening on localhost.
-        #[arg(long)]
+        /// Kept for compatibility: pasting is now the default.
+        #[arg(long, hide = true)]
         paste: bool,
+        /// Wait for the redirect on 127.0.0.1:47811 instead of pasting. SmartThings
+        /// answers "403 Access forbidden to this app" for localhost redirects on some
+        /// accounts (seen 2026-10), so this is opt-in.
+        #[arg(long, conflicts_with = "paste")]
+        local: bool,
     },
     /// Refresh the OAuth tokens now (run daily by the systemd user timer). Exits 4 if
     /// a new login is needed.
@@ -914,7 +919,7 @@ fn cmd_st_auth(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
             );
             println!("Next: tv-remote-tui smartthings login");
         }
-        StCommand::Login { paste } => {
+        StCommand::Login { paste: _, local } => {
             if !auth.status().app_imported {
                 return Err(Failure::new(
                     1,
@@ -923,7 +928,7 @@ fn cmd_st_auth(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
                 ));
             }
             let state = random_state();
-            let listener = if paste {
+            let listener = if !local {
                 None
             } else {
                 match CallbackListener::bind() {
@@ -1872,11 +1877,11 @@ mod tests {
         ));
         assert!(matches!(
             parse(&["smartthings", "login"]).command,
-            Some(Command::SmartThings { cmd: StCommand::Login { paste: false } })
+            Some(Command::SmartThings { cmd: StCommand::Login { paste: false, local: false } })
         ));
         assert!(matches!(
             parse(&["smartthings", "login", "--paste"]).command,
-            Some(Command::SmartThings { cmd: StCommand::Login { paste: true } })
+            Some(Command::SmartThings { cmd: StCommand::Login { paste: true, local: false } })
         ));
         assert!(matches!(
             parse(&["smartthings", "refresh", "--quiet"]).command,

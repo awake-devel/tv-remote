@@ -532,7 +532,9 @@ impl DevicePage {
         let Some(ctx) = self.ctx.upgrade() else { return };
         let auth = ctx.fleet.smartthings_auth();
         let state = random_state();
-        let listener = CallbackListener::bind().ok();
+        // The localhost redirect gets "403 Access forbidden to this app" from
+        // SmartThings on some accounts, so the GUI always uses the httpbin paste flow.
+        let listener: Option<CallbackListener> = None;
         let redirect = listener.as_ref().map(|l| l.redirect_uri()).unwrap_or_else(|| PASTE_REDIRECT.to_string());
         let url = match auth.authorize_url(&state, &redirect) {
             Ok(u) => u,

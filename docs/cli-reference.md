@@ -112,7 +112,7 @@ See [Casting](casting.md).
 | Command | Description | Example |
 |---|---|---|
 | `smartthings app-import [FILE]` | import the app you registered (default `~/.config/samsung-tv/st-app-created.json`) | `tv-remote-tui st app-import` |
-| `smartthings login [--paste]` | log in through the browser; `--paste` if port 47811 is busy | `tv-remote-tui st login` |
+| `smartthings login [--local]` | log in through the browser, then paste the httpbin.org address (or code); `--local` tries the automatic localhost redirect instead | `tv-remote-tui st login` |
 | `smartthings refresh [--quiet]` | renew the access token now | `tv-remote-tui st refresh` |
 | `smartthings logout` | delete the SmartThings tokens from the config | `tv-remote-tui st logout` |
 | `smartthings auth-status` | show the login state | `tv-remote-tui st auth-status` |

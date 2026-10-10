@@ -46,7 +46,7 @@ SmartThings personal access tokens now expire after 24 h, so TV Remote logs in w
 2. Import it and log in: **Device page → SmartThings → Import app file… → Connect SmartThings**, or
    ```sh
    tv-remote-tui smartthings app-import       # default: ~/.config/samsung-tv/st-app-created.json
-   tv-remote-tui smartthings login            # browser login; redirect to localhost:47811 (--paste: paste the httpbin URL)
+   tv-remote-tui smartthings login            # browser login, then paste the httpbin.org address it lands on
    tv-remote-tui smartthings auth-status
    ```
 

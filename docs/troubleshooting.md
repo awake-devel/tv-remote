@@ -104,6 +104,16 @@ Also check that the chosen audio track is the one you want: `netcheck` lists the
 
 Seeking only works in direct mode. A TV-friendly stream is converted live, so it can't jump ahead.
 
+## SmartThings login page shows "403 Access forbidden to this app"
+
+This happens when the login redirects to `localhost` (`smartthings login --local`). Use the default login, which redirects to httpbin.org and asks you to paste the address:
+
+```sh
+tv-remote-tui smartthings login
+```
+
+Also check that the scopes in the login link are the ones your app was registered with (`docs/smartthings-app.json`): a scope the app doesn't have makes the login fail.
+
 ## SmartThings: `invalid_grant`
 
 The refresh token was refused. It expired (for example the PC was off for weeks and the daily timer didn't run), or it was revoked. Log in again:

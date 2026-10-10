@@ -36,7 +36,7 @@ Key ideas in the core:
 | Discovery | SSDP (multicast `239.255.255.250:1900`) | UDP 1900 | PC → network, answers back |
 | Power on | Wake-on-LAN magic packet | UDP 9, broadcast | PC → network |
 | SmartThings | HTTPS REST, OAuth 2 | TCP 443 on `api.smartthings.com` | PC → internet |
-| SmartThings login | local redirect page | TCP 47811 on `localhost`, during `smartthings login` only | browser → PC |
+| SmartThings login | local redirect page (opt-in) | TCP 47811 on `localhost`, during `smartthings login --local` only | browser → PC |
 
 Notes:
 
