@@ -1,0 +1,17 @@
+[package]
+name = "tv-remote-gui"
+version.workspace = true
+edition.workspace = true
+description = "GTK4 / libadwaita remote control for the living-room Samsung TV"
+
+[[bin]]
+name = "tv-remote"
+path = "src/main.rs"
+
+[dependencies]
+tvremote_core = { path = "../core" }
+gtk = { package = "gtk4", version = "0.11.5", features = ["v4_22"] }
+adw = { package = "libadwaita", version = "0.9.2", features = ["v1_8"] }
+async-channel = "2.5.0"
+gdk4-wayland = { version = "0.11.5", features = ["wayland_crate"] }
+wayland-protocols = { version = "0.32.13", features = ["client", "unstable"] }

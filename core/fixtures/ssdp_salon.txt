@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+CACHE-CONTROL: max-age=1800
+DATE: Fri, 10 Oct 2026 10:00:00 GMT
+EXT:
+LOCATION: http://192.0.2.169:7676/smp_15_
+SERVER: SHP, UPnP/1.0, Samsung UPnP SDK/1.0
+ST: urn:samsung.com:device:RemoteControlReceiver:1
+USN: uuid:bbbbbbbb-0000-0000-0000-000000000001::urn:samsung.com:device:RemoteControlReceiver:1
+Content-Length: 0
+

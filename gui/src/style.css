@@ -1,0 +1,31 @@
+/* Remote page */
+.tv-ok { font-weight: bold; font-size: 1.2em; }
+.tv-rocker { padding: 6px; border-radius: 999px; background: alpha(currentColor, 0.05); }
+.tv-colour { border-radius: 6px; min-height: 24px; }
+.tv-red { background: #e01b24; }
+.tv-green { background: #2ec27e; }
+.tv-yellow { background: #f6d32d; }
+.tv-blue { background: #3584e4; }
+.tv-red:hover { background: shade(#e01b24, 1.1); }
+.tv-green:hover { background: shade(#2ec27e, 1.1); }
+.tv-yellow:hover { background: shade(#f6d32d, 1.1); }
+.tv-blue:hover { background: shade(#3584e4, 1.1); }
+
+/* Touchpad */
+.tv-touchpad-frame { border-radius: 12px; }
+.tv-touchpad { background: alpha(currentColor, 0.04); transition: background 150ms ease; }
+.tv-touchpad.captured { background: alpha(@accent_bg_color, 0.14); }
+.tv-touchpad-frame.captured { border-color: @accent_color; box-shadow: 0 0 0 2px alpha(@accent_color, 0.6); }
+
+/* Apps */
+.tv-app-tile { padding: 6px; }
+
+/* Browser badges */
+.tv-badge { font-size: 1.1em; min-width: 1.5em; }
+.tv-badge.success { color: @success_color; }
+.tv-badge.warning { color: @warning_color; }
+.tv-badge.error { color: @error_color; }
+
+/* Header status */
+.tv-status.success image { color: @success_color; }
+.tv-status.warning image { color: @warning_color; }

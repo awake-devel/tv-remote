@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "deviceId": "00000000-aaaa-bbbb-cccc-000000000001",
+      "name": "Samsung Q7F 85", "label": "Salon",
+      "manufacturerName": "Samsung Electronics", "presentationId": "VD-STV-2025-FAKE",
+      "deviceManufacturerCode": "Samsung Electronics", "locationId": "loc-1", "roomId": "room-1",
+      "deviceTypeName": "Samsung OCF TV", "type": "OCF", "deviceNetworkType": "OCF",
+      "components": [{"id": "main", "label": "main", "capabilities": [
+        {"id": "ocf", "version": 1}, {"id": "switch", "version": 1}, {"id": "audioVolume", "version": 1},
+        {"id": "audioMute", "version": 1}, {"id": "samsungvd.mediaInputSource", "version": 1},
+        {"id": "samsungvd.pictureMode", "version": 1}, {"id": "samsungvd.thingStatus", "version": 1},
+        {"id": "healthCheck", "version": 1}]}],
+      "ocf": {
+        "ocfDeviceType": "oic.d.tv", "name": "[TV] Samsung Q7F 85", "specVersion": "core.1.1.0",
+        "verticalDomainSpecVersion": "res.1.1.0,sh.1.1.0", "manufacturerName": "Samsung Electronics",
+        "modelNumber": "QE85Q7FAAUXXC", "platformVersion": "Tizen 9.0", "platformOS": "Tizen",
+        "hwVersion": "", "firmwareVersion": "T-FAKE-0000.0", "vendorId": "VD-STV-2025",
+        "locale": "fr_FR", "lastSignupTime": "2026-10-10T10:00:00.000Z"
+      }
+    },
+    {
+      "deviceId": "00000000-aaaa-bbbb-cccc-000000000002",
+      "name": "[TV] Samsung 7 Series (55)", "label": "Chambre",
+      "type": "OCF",
+      "components": [{"id": "main", "capabilities": [{"id": "ocf"}, {"id": "switch"}, {"id": "tvChannel"}]}],
+      "ocf": {"ocfDeviceType": "oic.d.tv"}
+    },
+    {
+      "deviceId": "00000000-aaaa-bbbb-cccc-000000000003",
+      "name": "Bureau TV", "label": "",
+      "type": "OCF",
+      "components": [{"id": "main", "capabilities": [{"id": "switch"}, {"id": "samsungvd.soundMode"}]}],
+      "ocf": {"ocfDeviceType": "oic.d.tv", "name": "[TV] Bureau", "modelNumber": "UE43AU7100", "macAddress": "AA:BB:CC:DD:EE:03"}
+    },
+    {
+      "deviceId": "00000000-aaaa-bbbb-cccc-000000000099",
+      "name": "Fridge", "label": "Frigo",
+      "components": [{"id": "main", "capabilities": [{"id": "refrigeration"}]}],
+      "ocf": {"ocfDeviceType": "oic.d.refrigerator"}
+    }
+  ],
+  "_links": {}
+}

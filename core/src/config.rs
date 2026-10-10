@@ -1,0 +1,842 @@
+//! Configuration file `~/.config/samsung-tv/config.json`.
+//!
+//! # Format (version 2, several TVs)
+//!
+//! ```json
+//! {
+//!   "config_version": 2,
+//!   "name": "Ryoku",                       // client name shown on every TV (account-level)
+//!   "smartthings_token": "…",              // optional SmartThings PAT (account-level)
+//!   "active": "tv1",                       // id of the active TV
+//!   "tvs": [
+//!     { "id": "tv1", "name": "TV du salon", "host": "192.0.2.10", "port": 8002,
+//!       "mac": "…", "model": "…", "token": "…", "smartthings_device_id": "…",
+//!       "smartthings_unlinked": [], "last_seen": { "lan": 1760000000, "cloud": null, "ip": "…" } }
+//!   ],
+//!   "host": "192.0.2.10", "port": 8002, "token": "…", "model": "…", "mac": "…"
+//! }
+//! ```
+//!
+//! The trailing flat keys are a **legacy mirror** of the active TV, rewritten on every
+//! save so that older scripts sharing this file (`tv-cast` reads `host`) keep working.
+//! They are ignored on load once `tvs` exists.
+//!
+//! # Migration from the flat format (version 1)
+//!
+//! A file without a `tvs` key is the old single-TV format (`host`, `port`, `name`,
+//! `token`, `model`, `mac`, `smartthings_token`, `smartthings_device_id`). It is migrated
+//! in memory on load ([`AppConfig::from_json`]): `name` and `smartthings_token` become
+//! account settings; `host`, `port`, `token`, `model`, `mac` and `smartthings_device_id`
+//! become the first TV (id `tv1`), which is active. The pairing token moves unchanged,
+//! so the TV does not ask for approval again. Unknown keys are kept. The file is only
+//! rewritten in the new format on the next save.
+//!
+//! The file is written atomically with mode 0600 (it holds tokens). A file that exists
+//! but cannot be parsed is never overwritten (loading fails with [`Error::Config`]).
+
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::error::{Error, Result};
+
+/// Current config file version (written as `config_version`).
+pub const CONFIG_VERSION: u32 = 2;
+
+/// Keys of the flat (version 1) format that the legacy mirror rewrites; they are never
+/// kept in [`AppConfig::extra`].
+const LEGACY_KEYS: [&str; 6] = ["host", "port", "token", "model", "mac", "smartthings_device_id"];
+
+fn default_port() -> u16 {
+    8002
+}
+fn default_name() -> String {
+    "Ryoku".to_string()
+}
+
+/// When and where a TV was last seen (Unix seconds).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastSeen {
+    /// Last time it answered on the LAN (SSDP or REST).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lan: Option<u64>,
+    /// Last time SmartThings reported it online.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<u64>,
+    /// The IP it had when last seen on the LAN.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+}
+
+/// One known TV in the config file.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct TvEntry {
+    /// Stable local id (`tv1`, `tv2`, …). Never changes, even on rename.
+    pub id: String,
+    /// Display name (e.g. "TV du salon").
+    #[serde(default)]
+    pub name: String,
+    /// IP address or host name; empty for a cloud-only TV.
+    #[serde(default)]
+    pub host: String,
+    /// Remote-control WebSocket port (8002 = wss).
+    #[serde(default = "default_port")]
+    pub port: u16,
+    /// MAC address for Wake-on-LAN and for matching (`aa:bb:cc:dd:ee:ff`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// Model code, informational and used for matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Pairing token issued by this TV. Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// SmartThings device id linked to this TV (manual link or auto-match).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartthings_device_id: Option<String>,
+    /// SmartThings device ids the user unlinked from this TV: never auto-linked again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub smartthings_unlinked: Vec<String>,
+    /// Last-seen information.
+    #[serde(default, skip_serializing_if = "is_default_seen")]
+    pub last_seen: LastSeen,
+    /// Unknown keys of this entry, preserved verbatim.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn is_default_seen(s: &LastSeen) -> bool {
+    *s == LastSeen::default()
+}
+
+impl TvEntry {
+    /// New entry with defaults.
+    pub fn new(id: &str, name: &str, host: &str) -> TvEntry {
+        TvEntry {
+            id: id.to_string(),
+            name: name.to_string(),
+            host: host.to_string(),
+            port: default_port(),
+            mac: None,
+            model: None,
+            token: None,
+            smartthings_device_id: None,
+            smartthings_unlinked: Vec::new(),
+            last_seen: LastSeen::default(),
+            extra: BTreeMap::new(),
+        }
+    }
+
+    /// Display name, falling back to the model, the host, then the id.
+    pub fn display_name(&self) -> String {
+        [Some(&self.name), self.model.as_ref(), Some(&self.host)]
+            .into_iter()
+            .flatten()
+            .find(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.id.clone())
+    }
+}
+
+impl std::fmt::Debug for TvEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TvEntry")
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("mac", &self.mac)
+            .field("model", &self.model)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("smartthings_device_id", &self.smartthings_device_id)
+            .field("smartthings_unlinked", &self.smartthings_unlinked)
+            .field("last_seen", &self.last_seen)
+            .finish()
+    }
+}
+
+/// The whole config file: account settings plus the list of TVs.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct AppConfig {
+    /// Format version ([`CONFIG_VERSION`]).
+    #[serde(default)]
+    pub config_version: u32,
+    /// Client name shown on the TVs' device lists (sent base64-encoded).
+    #[serde(default = "default_name")]
+    pub name: String,
+    /// Optional SmartThings personal access token. Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartthings_token: Option<String>,
+    /// Id of the active TV.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+    /// Known TVs, in display order.
+    #[serde(default)]
+    pub tvs: Vec<TvEntry>,
+    /// Any other top-level keys, preserved verbatim.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        AppConfig {
+            config_version: CONFIG_VERSION,
+            name: default_name(),
+            smartthings_token: None,
+            active: None,
+            tvs: Vec::new(),
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("name", &self.name)
+            .field("smartthings_token", &self.smartthings_token.as_ref().map(|_| "<redacted>"))
+            .field("active", &self.active)
+            .field("tvs", &self.tvs)
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl AppConfig {
+    /// Parse the file contents, migrating the flat single-TV format (see the module
+    /// docs). Pure.
+    pub fn from_json(v: Value) -> Result<AppConfig> {
+        let Value::Object(mut obj) = v else {
+            return Err(Error::Config("the config is not a JSON object".into()));
+        };
+        if obj.contains_key("tvs") {
+            // New format; drop the legacy mirror (rewritten on save).
+            for k in LEGACY_KEYS {
+                obj.remove(k);
+            }
+            let mut cfg: AppConfig = serde_json::from_value(Value::Object(obj))?;
+            cfg.config_version = CONFIG_VERSION;
+            cfg.fix_active();
+            return Ok(cfg);
+        }
+        // Flat (version 1) format.
+        let take_str = |obj: &mut serde_json::Map<String, Value>, k: &str| -> Option<String> {
+            match obj.remove(k) {
+                Some(Value::String(s)) => Some(s),
+                Some(Value::Number(n)) => Some(n.to_string()),
+                _ => None,
+            }
+        };
+        let host = take_str(&mut obj, "host");
+        let port = obj.remove("port").and_then(|p| p.as_u64()).and_then(|p| u16::try_from(p).ok());
+        let token = take_str(&mut obj, "token");
+        let model = take_str(&mut obj, "model");
+        let mac = take_str(&mut obj, "mac");
+        let st_dev = take_str(&mut obj, "smartthings_device_id");
+        let name = take_str(&mut obj, "name").unwrap_or_else(default_name);
+        let st_tok = take_str(&mut obj, "smartthings_token");
+        obj.remove("config_version");
+        let mut cfg = AppConfig {
+            config_version: CONFIG_VERSION,
+            name,
+            smartthings_token: st_tok,
+            active: None,
+            tvs: Vec::new(),
+            extra: obj.into_iter().collect(),
+        };
+        let has_tv = host.as_deref().is_some_and(|h| !h.trim().is_empty())
+            || token.is_some()
+            || mac.is_some()
+            || st_dev.is_some();
+        if has_tv {
+            let mut e = TvEntry::new("tv1", "", host.as_deref().unwrap_or(""));
+            e.name = match &model {
+                Some(m) if !m.trim().is_empty() => format!("Samsung {m}"),
+                _ => "Samsung TV".into(),
+            };
+            e.port = port.unwrap_or_else(default_port);
+            e.token = token;
+            e.model = model;
+            e.mac = mac;
+            e.smartthings_device_id = st_dev;
+            cfg.tvs.push(e);
+            cfg.active = Some("tv1".into());
+        }
+        Ok(cfg)
+    }
+
+    /// Serialise for the file: the new format plus the legacy mirror of the active TV.
+    pub fn to_json(&self) -> Result<Value> {
+        let mut v = serde_json::to_value(self)?;
+        if let (Value::Object(obj), Some(tv)) = (&mut v, self.active_entry()) {
+            obj.insert("host".into(), Value::String(tv.host.clone()));
+            obj.insert("port".into(), Value::from(tv.port));
+            for (k, val) in [("token", &tv.token), ("model", &tv.model), ("mac", &tv.mac)] {
+                if let Some(s) = val {
+                    obj.insert(k.into(), Value::String(s.clone()));
+                }
+            }
+        }
+        Ok(v)
+    }
+
+    /// Make sure `active` names an existing TV (first one otherwise, `None` if empty).
+    pub fn fix_active(&mut self) {
+        let ok = self.active.as_ref().is_some_and(|a| self.tvs.iter().any(|t| &t.id == a));
+        if !ok {
+            self.active = self.tvs.first().map(|t| t.id.clone());
+        }
+    }
+
+    /// `~/.config/samsung-tv/config.json` (honours `$XDG_CONFIG_HOME`).
+    pub fn default_path() -> PathBuf {
+        Config::default_path()
+    }
+
+    /// Load and migrate a config file.
+    pub fn load_from(path: &Path) -> Result<AppConfig> {
+        let text = fs::read_to_string(path)
+            .map_err(|e| Error::Config(format!("cannot read {}: {e}", path.display())))?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| Error::Config(format!("invalid {}: {e}", path.display())))?;
+        Self::from_json(v).map_err(|e| Error::Config(format!("invalid {}: {e}", path.display())))
+    }
+
+    /// Like [`AppConfig::load_from`], but a missing file gives the defaults.
+    pub fn load_or_default(path: &Path) -> Result<AppConfig> {
+        match fs::metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
+            _ => Self::load_from(path),
+        }
+    }
+
+    /// Save atomically (temp file + rename) with permissions 0600.
+    pub fn save_to(&self, path: &Path) -> Result<()> {
+        use std::os::unix::fs::OpenOptionsExt;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("json.tmp");
+        let text = serde_json::to_string_pretty(&self.to_json()?)?;
+        {
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.write_all(b"\n")?;
+            f.sync_all()?;
+        }
+        // mode() only applies on creation; enforce it if the temp file pre-existed.
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// The active TV entry, if any.
+    pub fn active_entry(&self) -> Option<&TvEntry> {
+        let id = self.active.as_ref()?;
+        self.tvs.iter().find(|t| &t.id == id)
+    }
+
+    /// Entry by id.
+    pub fn entry(&self, id: &str) -> Option<&TvEntry> {
+        self.tvs.iter().find(|t| t.id == id)
+    }
+
+    /// Mutable entry by id.
+    pub fn entry_mut(&mut self, id: &str) -> Option<&mut TvEntry> {
+        self.tvs.iter_mut().find(|t| t.id == id)
+    }
+
+    /// The next free id (`tv1`, `tv2`, …).
+    pub fn next_id(&self) -> String {
+        (1..)
+            .map(|n| format!("tv{n}"))
+            .find(|id| self.entry(id).is_none())
+            .unwrap_or_else(|| "tv".into())
+    }
+
+    /// Find a TV by selector: exact id, then display name (any case), then host, then a
+    /// unique case-insensitive prefix of the id or name. Pure.
+    pub fn resolve(&self, sel: &str) -> Result<&TvEntry> {
+        let s = sel.trim();
+        if s.is_empty() {
+            return Err(Error::Config("empty TV name".into()));
+        }
+        let lower = s.to_lowercase();
+        if let Some(e) = self.tvs.iter().find(|t| t.id == s) {
+            return Ok(e);
+        }
+        let by_name: Vec<_> = self.tvs.iter().filter(|t| t.display_name().to_lowercase() == lower).collect();
+        if by_name.len() == 1 {
+            return Ok(by_name[0]);
+        }
+        if let Some(e) = self.tvs.iter().find(|t| !t.host.is_empty() && t.host == s) {
+            return Ok(e);
+        }
+        let pre: Vec<_> = self
+            .tvs
+            .iter()
+            .filter(|t| t.id.to_lowercase().starts_with(&lower) || t.display_name().to_lowercase().starts_with(&lower))
+            .collect();
+        match pre.len() {
+            1 => Ok(pre[0]),
+            0 => Err(Error::Config(format!("no TV named '{s}' (see `tvs list`)"))),
+            _ => Err(Error::Config(format!(
+                "'{s}' matches several TVs: {}",
+                pre.iter().map(|t| format!("{} ({})", t.display_name(), t.id)).collect::<Vec<_>>().join(", ")
+            ))),
+        }
+    }
+
+    /// The per-TV [`Config`] view of TV `id` (or of the active TV if `id` is `None`);
+    /// a default view carrying the account settings if there is no such TV.
+    pub fn view(&self, id: Option<&str>) -> Config {
+        let entry = match id {
+            Some(id) => self.entry(id),
+            None => self.active_entry(),
+        };
+        let mut c = Config {
+            name: self.name.clone(),
+            smartthings_token: self.smartthings_token.clone(),
+            ..Config::default()
+        };
+        match entry {
+            Some(e) => {
+                c.id = e.id.clone();
+                c.display_name = e.display_name();
+                c.host = e.host.clone();
+                c.port = e.port;
+                c.token = e.token.clone();
+                c.model = e.model.clone();
+                c.mac = e.mac.clone();
+                c.smartthings_device_id = e.smartthings_device_id.clone();
+                c.extra = e.extra.clone();
+            }
+            None => c.id = id.unwrap_or_default().to_string(),
+        }
+        c
+    }
+
+    /// Write a modified [`Config`] view back: account fields to the account, the rest to
+    /// TV `id` (or the view's id, or the active TV). A view with no TV behind it creates
+    /// one if it now has a host, token, MAC or SmartThings device (the first TV becomes
+    /// active). Returns the id written to, if any.
+    pub fn apply_view(&mut self, id: Option<&str>, before: &Config, after: &Config) -> Option<String> {
+        self.name = after.name.clone();
+        self.smartthings_token = after.smartthings_token.clone();
+        let target = id
+            .map(str::to_string)
+            .or_else(|| (!after.id.is_empty()).then(|| after.id.clone()))
+            .or_else(|| self.active.clone());
+        let exists = target.as_deref().is_some_and(|t| self.entry(t).is_some());
+        if !exists {
+            let wants = !after.host.trim().is_empty()
+                || after.token.is_some()
+                || after.mac.is_some()
+                || after.smartthings_device_id.is_some();
+            if !wants {
+                return None;
+            }
+            let new_id = target.filter(|t| !t.is_empty()).unwrap_or_else(|| self.next_id());
+            let mut e = TvEntry::new(&new_id, "", "");
+            if after.display_name != before.display_name {
+                e.name = after.display_name.clone();
+            }
+            self.tvs.push(e);
+            if self.active.is_none() {
+                self.active = Some(new_id.clone());
+            }
+            return self.write_entry(&new_id, before, after);
+        }
+        let t = target?;
+        self.write_entry(&t, before, after)
+    }
+
+    fn write_entry(&mut self, id: &str, before: &Config, after: &Config) -> Option<String> {
+        let e = self.entry_mut(id)?;
+        e.host = after.host.clone();
+        e.port = after.port;
+        e.token = after.token.clone();
+        e.model = after.model.clone();
+        e.mac = after.mac.clone();
+        e.smartthings_device_id = after.smartthings_device_id.clone();
+        e.extra = after.extra.clone();
+        if after.display_name != before.display_name {
+            e.name = after.display_name.clone();
+        }
+        Some(id.to_string())
+    }
+}
+
+/// Settings of **one** TV as the single-TV API sees them: that TV's entry plus the
+/// account settings (`name`, `smartthings_token`). Build it with [`AppConfig::view`];
+/// [`crate::Tv::update_config`] writes changes back to the right place.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct Config {
+    /// Local id of the TV (empty if the view has no TV behind it yet).
+    #[serde(default)]
+    pub id: String,
+    /// Display name of the TV.
+    #[serde(default)]
+    pub display_name: String,
+    /// TV IP address or host name.
+    #[serde(default)]
+    pub host: String,
+    /// Remote-control WebSocket port (8002 = wss).
+    #[serde(default = "default_port")]
+    pub port: u16,
+    /// Client name shown on the TV's device list (account-level).
+    #[serde(default = "default_name")]
+    pub name: String,
+    /// Pairing token issued by this TV. Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// TV model code, informational.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// TV MAC address for Wake-on-LAN (`aa:bb:cc:dd:ee:ff`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mac: Option<String>,
+    /// Optional SmartThings personal access token (account-level). Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartthings_token: Option<String>,
+    /// SmartThings device id linked to this TV.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartthings_device_id: Option<String>,
+    /// Unknown keys of the TV's entry, preserved verbatim.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            id: String::new(),
+            display_name: String::new(),
+            host: String::new(),
+            port: default_port(),
+            name: default_name(),
+            token: None,
+            model: None,
+            mac: None,
+            smartthings_token: None,
+            smartthings_device_id: None,
+            extra: BTreeMap::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let red = |o: &Option<String>| o.as_ref().map(|_| "<redacted>");
+        f.debug_struct("Config")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("name", &self.name)
+            .field("token", &red(&self.token))
+            .field("model", &self.model)
+            .field("mac", &self.mac)
+            .field("smartthings_token", &red(&self.smartthings_token))
+            .field("smartthings_device_id", &self.smartthings_device_id)
+            .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
+impl Config {
+    /// `~/.config/samsung-tv/config.json` (honours `$XDG_CONFIG_HOME`).
+    pub fn default_path() -> PathBuf {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join(".config"));
+        base.join("samsung-tv").join("config.json")
+    }
+
+    /// The active TV's view of [`Config::default_path`].
+    pub fn load() -> Result<Config> {
+        Self::load_from(&Self::default_path())
+    }
+
+    /// The active TV's view of a config file (either format).
+    pub fn load_from(path: &Path) -> Result<Config> {
+        Ok(AppConfig::load_from(path)?.view(None))
+    }
+}
+
+/// `$HOME` (falls back to `/`).
+pub fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// `~/.cache/tv-remote/` (honours `$XDG_CACHE_HOME`); created on demand.
+pub fn cache_dir() -> PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".cache"));
+    let dir = base.join("tv-remote");
+    let _ = fs::create_dir_all(&dir);
+    dir
+}
+
+/// An [`AppConfig`] shared between threads, with an optional backing file, seen
+/// through a TV scope.
+///
+/// Background threads (e.g. a remote channel persisting a new token) and the UI read
+/// and update the same instance. Clones made with [`SharedConfig::scoped`] share the
+/// data but [`SharedConfig::get`] / [`SharedConfig::update`] act on one TV's
+/// [`Config`] view; an unscoped handle follows the active TV.
+#[derive(Clone, Debug)]
+pub struct SharedConfig {
+    inner: Arc<RwLock<AppConfig>>,
+    path: Option<PathBuf>,
+    scope: Option<String>,
+}
+
+impl SharedConfig {
+    /// Wrap a single-TV view (`path` = where updates are persisted, `None` = memory
+    /// only). The view becomes the only TV; the handle is scoped to it.
+    pub fn new(cfg: Config, path: Option<PathBuf>) -> Self {
+        let mut app = AppConfig::default();
+        let before = Config::default();
+        let id = app.apply_view(None, &before, &cfg);
+        let mut s = Self::from_app(app, path);
+        s.scope = id;
+        s
+    }
+
+    /// Wrap a whole config (unscoped: follows the active TV).
+    pub fn from_app(cfg: AppConfig, path: Option<PathBuf>) -> Self {
+        SharedConfig {
+            inner: Arc::new(RwLock::new(cfg)),
+            path,
+            scope: None,
+        }
+    }
+
+    /// A handle on the same data, scoped to TV `id`.
+    pub fn scoped(&self, id: &str) -> SharedConfig {
+        SharedConfig {
+            inner: self.inner.clone(),
+            path: self.path.clone(),
+            scope: Some(id.to_string()),
+        }
+    }
+
+    /// A handle on the same data that follows the active TV.
+    pub fn unscoped(&self) -> SharedConfig {
+        SharedConfig {
+            inner: self.inner.clone(),
+            path: self.path.clone(),
+            scope: None,
+        }
+    }
+
+    /// The TV this handle is scoped to (`None` = follows the active TV).
+    pub fn scope(&self) -> Option<&str> {
+        self.scope.as_deref()
+    }
+
+    /// The TV id this handle currently resolves to (its scope, else the active TV).
+    pub fn tv_id(&self) -> Option<String> {
+        self.scope.clone().or_else(|| self.app().active)
+    }
+
+    /// A snapshot of this handle's TV view.
+    pub fn get(&self) -> Config {
+        self.inner
+            .read()
+            .map(|c| c.view(self.scope.as_deref()))
+            .unwrap_or_default()
+    }
+
+    /// A snapshot of the whole config.
+    pub fn app(&self) -> AppConfig {
+        self.inner.read().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Backing file, if any.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    /// Mutate this handle's TV view and persist (see [`AppConfig::apply_view`]).
+    pub fn update(&self, f: impl FnOnce(&mut Config)) -> Result<()> {
+        let scope = self.scope.clone();
+        self.update_app(move |app| {
+            let before = app.view(scope.as_deref());
+            let mut after = before.clone();
+            f(&mut after);
+            if after != before {
+                app.apply_view(scope.as_deref(), &before, &after);
+            }
+        })
+    }
+
+    /// Mutate the whole config and persist it to the backing file (if any).
+    pub fn update_app<R>(&self, f: impl FnOnce(&mut AppConfig) -> R) -> Result<R> {
+        let (snapshot, r) = {
+            let mut guard = self
+                .inner
+                .write()
+                .map_err(|_| Error::Config("config lock poisoned".into()))?;
+            let r = f(&mut guard);
+            guard.fix_active();
+            (guard.clone(), r)
+        };
+        if let Some(p) = &self.path {
+            snapshot.save_to(p)?;
+        }
+        Ok(r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tvremote-cfg-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The exact flat format written by the single-TV versions (fake values).
+    const FLAT_V1: &str = r#"{
+  "host": "192.0.2.169",
+  "port": 8002,
+  "name": "Ryoku",
+  "token": "11111111",
+  "model": "QE85Q7FAAUXXC",
+  "mac": "AA:BB:CC:DD:EE:01",
+  "smartthings_token": "fake-pat",
+  "smartthings_device_id": "00000000-aaaa-bbbb-cccc-000000000001",
+  "future": {"x": 1}
+}"#;
+
+    #[test]
+    fn migrates_the_flat_format() {
+        let dir = temp("migrate");
+        let path = dir.join("config.json");
+        fs::write(&path, FLAT_V1).unwrap();
+        let app = AppConfig::load_from(&path).unwrap();
+        assert_eq!(app.name, "Ryoku");
+        assert_eq!(app.smartthings_token.as_deref(), Some("fake-pat"));
+        assert_eq!(app.active.as_deref(), Some("tv1"));
+        assert_eq!(app.tvs.len(), 1);
+        let tv = &app.tvs[0];
+        assert_eq!(tv.host, "192.0.2.169");
+        assert_eq!(tv.port, 8002);
+        assert_eq!(tv.token.as_deref(), Some("11111111"), "the pairing token moves unchanged");
+        assert_eq!(tv.mac.as_deref(), Some("AA:BB:CC:DD:EE:01"));
+        assert_eq!(tv.model.as_deref(), Some("QE85Q7FAAUXXC"));
+        assert_eq!(tv.smartthings_device_id.as_deref(), Some("00000000-aaaa-bbbb-cccc-000000000001"));
+        assert_eq!(app.extra.get("future"), Some(&serde_json::json!({"x": 1})));
+        assert!(!app.extra.contains_key("host"));
+        // The view the single-TV API sees is the same as before.
+        let v = app.view(None);
+        assert_eq!((v.host.as_str(), v.token.as_deref(), v.name.as_str()), ("192.0.2.169", Some("11111111"), "Ryoku"));
+        assert!(!format!("{app:?}").contains("11111111"));
+        assert!(!format!("{v:?}").contains("fake-pat"));
+        // Loading does not touch the file.
+        assert_eq!(fs::read_to_string(&path).unwrap(), FLAT_V1);
+
+        // Save → new format + legacy mirror, 0600, round-trips.
+        app.save_to(&path).unwrap();
+        let raw: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["config_version"], 2);
+        assert_eq!(raw["tvs"][0]["token"], "11111111");
+        assert_eq!(raw["host"], "192.0.2.169", "legacy mirror for tv-cast");
+        assert_eq!(raw["future"]["x"], 1);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let back = AppConfig::load_from(&path).unwrap();
+        assert_eq!(back, app);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn minimal_and_empty_flat_files() {
+        let app = AppConfig::from_json(serde_json::json!({"host": "h"})).unwrap();
+        assert_eq!(app.tvs[0].port, 8002);
+        assert_eq!(app.name, "Ryoku");
+        assert!(app.tvs[0].token.is_none());
+        let empty = AppConfig::from_json(serde_json::json!({})).unwrap();
+        assert!(empty.tvs.is_empty() && empty.active.is_none());
+        assert!(AppConfig::from_json(serde_json::json!([1])).is_err());
+        let json = serde_json::to_string(&empty.to_json().unwrap()).unwrap();
+        assert!(!json.contains("smartthings"));
+    }
+
+    #[test]
+    fn new_format_ignores_stale_mirror_and_fixes_active() {
+        let app = AppConfig::from_json(serde_json::json!({
+            "tvs": [{"id": "tv1", "host": "10.0.0.1"}, {"id": "tv2", "name": "Chambre", "host": "10.0.0.2", "zz": true}],
+            "active": "gone", "host": "1.2.3.4"
+        }))
+        .unwrap();
+        assert_eq!(app.active.as_deref(), Some("tv1"));
+        assert!(!app.extra.contains_key("host"));
+        assert_eq!(app.tvs[1].extra.get("zz"), Some(&Value::Bool(true)));
+        assert_eq!(app.resolve("chambre").unwrap().id, "tv2");
+        assert_eq!(app.resolve("tv2").unwrap().id, "tv2");
+        assert_eq!(app.resolve("10.0.0.1").unwrap().id, "tv1");
+        assert!(app.resolve("tv").is_err(), "ambiguous prefix");
+        assert!(app.resolve("nope").is_err());
+        assert_eq!(app.next_id(), "tv3");
+    }
+
+    #[test]
+    fn scoped_updates_write_to_the_right_tv() {
+        let mut app = AppConfig::default();
+        app.tvs.push(TvEntry::new("tv1", "Salon", "10.0.0.1"));
+        app.tvs.push(TvEntry::new("tv2", "Chambre", "10.0.0.2"));
+        app.active = Some("tv1".into());
+        let shared = SharedConfig::from_app(app, None);
+        let tv2 = shared.scoped("tv2");
+        tv2.update(|c| {
+            c.token = Some("t2".into());
+            c.smartthings_token = Some("pat".into());
+        })
+        .unwrap();
+        let a = shared.app();
+        assert_eq!(a.entry("tv2").unwrap().token.as_deref(), Some("t2"));
+        assert!(a.entry("tv1").unwrap().token.is_none());
+        assert_eq!(a.smartthings_token.as_deref(), Some("pat"), "account-level");
+        assert_eq!(shared.get().id, "tv1", "unscoped follows active");
+        assert_eq!(tv2.get().display_name, "Chambre");
+    }
+
+    #[test]
+    fn first_run_creates_a_tv_on_update() {
+        let shared = SharedConfig::from_app(AppConfig::default(), None);
+        assert!(shared.get().host.is_empty());
+        shared.update(|c| c.name = "Client".into()).unwrap();
+        assert!(shared.app().tvs.is_empty(), "no TV without a host");
+        shared.update(|c| c.host = "192.0.2.7".into()).unwrap();
+        let a = shared.app();
+        assert_eq!(a.tvs.len(), 1);
+        assert_eq!(a.active.as_deref(), Some("tv1"));
+        assert_eq!(a.name, "Client");
+        let s = SharedConfig::new(Config { host: "h".into(), ..Default::default() }, None);
+        assert_eq!(s.scope(), Some("tv1"));
+        assert_eq!(s.get().host, "h");
+    }
+}

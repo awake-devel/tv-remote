@@ -1,0 +1,13 @@
+{
+  "device": {
+    "OS": "Tizen", "PowerState": "standby", "TokenAuthSupport": "true",
+    "duid": "uuid:aaaaaaaa-0000-0000-0000-000000000002",
+    "id": "uuid:aaaaaaaa-0000-0000-0000-000000000002",
+    "ip": "192.0.2.42", "model": "20_NIKEM_UHD", "modelName": "UE55TU7000",
+    "name": "[TV] Samsung 7 Series (55)", "networkType": "wired", "resolution": "3840x2160",
+    "wifiMac": "aa:bb:cc:dd:ee:02"
+  },
+  "id": "uuid:aaaaaaaa-0000-0000-0000-000000000002",
+  "name": "[TV] Samsung 7 Series (55)",
+  "version": "2.0.25"
+}

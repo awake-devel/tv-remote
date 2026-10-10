@@ -1,0 +1,21 @@
+{
+  "device": {
+    "FrameTVSupport": "false", "GamePadSupport": "true", "ImeSyncedSupport": "true",
+    "Language": "fr_FR", "OS": "Tizen", "PowerState": "on", "TokenAuthSupport": "true",
+    "VoiceSupport": "true", "WallScreenRatio": "0", "WallService": "false",
+    "countryCode": "FR", "description": "Samsung DTV RCR", "developerIP": "0.0.0.0",
+    "developerMode": "0", "duid": "uuid:bbbbbbbb-0000-0000-0000-000000000001",
+    "firmwareVersion": "Unknown", "id": "uuid:bbbbbbbb-0000-0000-0000-000000000001",
+    "ip": "192.0.2.169", "model": "25_PONTUSM_QTV", "modelName": "QE85Q7FAAUXXC",
+    "name": "[TV] Samsung Q7F 85", "networkType": "wireless", "resolution": "3840x2160",
+    "smartHubAgreement": "true", "type": "Samsung SmartTV", "udn": "uuid:bbbbbbbb-0000-0000-0000-000000000001",
+    "wifiMac": "aa:bb:cc:dd:ee:01"
+  },
+  "id": "uuid:bbbbbbbb-0000-0000-0000-000000000001",
+  "isSupport": "{}",
+  "name": "[TV] Samsung Q7F 85",
+  "remote": "1.0",
+  "type": "Samsung SmartTV",
+  "uri": "http://192.0.2.169:8001/api/v2/",
+  "version": "2.0.25"
+}

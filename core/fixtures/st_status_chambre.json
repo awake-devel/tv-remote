@@ -1,0 +1,16 @@
+{
+  "components": {
+    "main": {
+      "ocf": {
+        "n": {"value": "[TV] Samsung 7 Series (55)"},
+        "mnmo": {"value": "UE55TU7000"},
+        "mnfv": {"value": "T-FAKE-1000.1"},
+        "mnmn": {"value": "Samsung Electronics"},
+        "vid": {"value": "VD-STV-2020"},
+        "di": {"value": "aaaaaaaa-0000-0000-0000-000000000002"}
+      },
+      "switch": {"switch": {"value": "off"}},
+      "samsungvd.thingStatus": {"status": {"value": "Idle"}}
+    }
+  }
+}

@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=TV du salon
+Name[fr]=TV du salon
+Name[en]=Living-room TV
+GenericName=TV Remote
+GenericName[fr]=Télécommande TV
+Comment=Remote control and casting for the living-room Samsung TV
+Comment[fr]=Télécommande et diffusion de vidéos vers la TV Samsung du salon
+Comment[en]=Remote control and casting for the living-room Samsung TV
+Exec=tv-remote
+TryExec=tv-remote
+Icon=video-display
+Terminal=false
+Categories=AudioVideo;
+Keywords=TV;Samsung;remote;cast;DLNA;télécommande;télé;
+StartupNotify=true
