@@ -1,5 +1,12 @@
-//! Optional SmartThings cloud control (personal access token). Exposes what the local
-//! APIs cannot: picture mode, input source, and power/volume/channel as a fallback.
+//! Optional SmartThings cloud control. Exposes what the local APIs cannot: picture
+//! mode, input source, and power/volume/channel as a fallback.
+//!
+//! Authorization: an OAuth login ([`crate::smartthings_auth`], long-lived, refreshed
+//! automatically) or, as a legacy fallback, a personal access token (24 h for tokens
+//! created after 30 Dec 2024). Use [`crate::smartthings_auth::client_for`] (or
+//! `tv.smartthings()` / `fleet.smartthings()`) to get the right client. With OAuth,
+//! every request takes its token from [`StAuth::bearer`]; on HTTP 401 it refreshes once
+//! and retries once.
 //!
 //! Only capabilities the device actually reports are offered: every command checks
 //! [`StDevice::has`] first and returns [`Error::Unsupported`] otherwise.
@@ -11,6 +18,7 @@ use serde_json::{json, Value};
 
 use crate::error::{Error, Result};
 use crate::http::{status_and_body, tls_agent};
+use crate::smartthings_auth::StAuth;
 
 /// SmartThings REST base URL.
 pub const API: &str = "https://api.smartthings.com/v1";
@@ -341,16 +349,29 @@ pub fn command_body(capability: &str, command: &str, args: &[Value]) -> Value {
     json!({"commands": [{"component": "main", "capability": capability, "command": command, "arguments": args}]})
 }
 
+/// Where a [`SmartThings`] client gets its bearer token.
+#[derive(Clone)]
+enum Auth {
+    /// Personal access token (legacy).
+    Pat(String),
+    /// OAuth access token, refreshed as needed.
+    OAuth(StAuth),
+}
+
 /// SmartThings API client.
 #[derive(Clone)]
 pub struct SmartThings {
-    token: String,
+    auth: Auth,
     agent: ureq::Agent,
 }
 
 impl std::fmt::Debug for SmartThings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SmartThings").field("token", &"<redacted>").finish()
+        let kind = match self.auth {
+            Auth::Pat(_) => "PAT",
+            Auth::OAuth(_) => "OAuth",
+        };
+        f.debug_struct("SmartThings").field("auth", &kind).field("token", &"<redacted>").finish()
     }
 }
 
@@ -358,23 +379,50 @@ impl SmartThings {
     /// New client with a personal access token (no traffic until used).
     pub fn new(token: &str) -> Result<SmartThings> {
         if token.trim().is_empty() {
-            return Err(Error::SmartThings("no token configured".into()));
+            return Err(Error::SmartThingsNotConnected);
         }
         Ok(SmartThings {
-            token: token.trim().to_string(),
+            auth: Auth::Pat(token.trim().to_string()),
             agent: tls_agent(Duration::from_secs(10))?,
         })
     }
 
+    /// New client using the OAuth login of `auth` (no traffic until used).
+    pub fn with_oauth(auth: StAuth) -> Result<SmartThings> {
+        Ok(SmartThings { auth: Auth::OAuth(auth), agent: tls_agent(Duration::from_secs(10))? })
+    }
+
+    /// True if this client uses OAuth (false: a personal access token).
+    pub fn uses_oauth(&self) -> bool {
+        matches!(self.auth, Auth::OAuth(_))
+    }
+
+    /// Run `req` with a bearer token; with OAuth, a 401 refreshes once and retries once.
+    /// `req` sends the request with the given `Authorization` value and returns
+    /// [`status_and_body`].
+    fn call(&self, req: impl Fn(&str) -> Result<(u16, String)>) -> Result<(u16, String)> {
+        match &self.auth {
+            Auth::Pat(t) => req(&format!("Bearer {t}")),
+            Auth::OAuth(a) => {
+                let tok = a.bearer()?;
+                let (code, body) = req(&format!("Bearer {tok}"))?;
+                if code != 401 {
+                    return Ok((code, body));
+                }
+                let tok2 = a.after_unauthorized(&tok)?;
+                req(&format!("Bearer {tok2}"))
+            }
+        }
+    }
+
     fn get(&self, path: &str) -> Result<Value> {
-        let r = self
-            .agent
-            .get(&format!("{API}{path}"))
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .call();
-        let (code, body) = status_and_body(r)?;
+        let url = format!("{API}{path}");
+        let (code, body) = self.call(|auth| status_and_body(self.agent.get(&url).set("Authorization", auth).call()))?;
         if code == 401 || code == 403 {
-            return Err(Error::SmartThings("token rejected (check its scopes: r:devices:*, x:devices:*)".into()));
+            return Err(Error::SmartThings(match self.auth {
+                Auth::Pat(_) => "token rejected (expired? PATs last 24 h; check its scopes: r:devices:*, x:devices:*)".into(),
+                Auth::OAuth(_) => format!("access refused (HTTP {code}): log in again if this persists"),
+            }));
         }
         if code >= 400 {
             return Err(Error::SmartThings(format!("GET {path}: HTTP {code}")));
@@ -421,12 +469,15 @@ impl SmartThings {
 
     /// Send any command (no capability check).
     pub fn command(&self, device_id: &str, capability: &str, command: &str, args: &[Value]) -> Result<()> {
-        let r = self
-            .agent
-            .post(&format!("{API}/devices/{device_id}/commands"))
-            .set("Authorization", &format!("Bearer {}", self.token))
-            .send_json(command_body(capability, command, args));
-        let (code, body) = status_and_body(r)?;
+        let url = format!("{API}/devices/{device_id}/commands");
+        let (code, body) = self.call(|auth| {
+            status_and_body(
+                self.agent
+                    .post(&url)
+                    .set("Authorization", auth)
+                    .send_json(command_body(capability, command, args)),
+            )
+        })?;
         if code >= 400 {
             let msg = serde_json::from_str::<Value>(&body)
                 .ok()

@@ -1,0 +1,13 @@
+{
+  "appName": "tv-remote-<your-github-name>",
+  "displayName": "TV Remote",
+  "description": "Remote control for Samsung TVs on Linux (picture mode, input source, cloud fallback for power and volume).",
+  "appType": "API_ONLY",
+  "classifications": ["CONNECTED_SERVICE"],
+  "singleInstance": true,
+  "oauth": {
+    "clientName": "TV Remote",
+    "scope": ["r:devices:*", "w:devices:*", "x:devices:*", "r:locations:*"],
+    "redirectUris": ["http://localhost:47811/callback", "https://httpbin.org/get"]
+  }
+}

@@ -30,6 +30,7 @@ pub mod remote;
 pub mod rest;
 pub mod server;
 pub mod smartthings;
+pub mod smartthings_auth;
 pub mod wol;
 
 use std::path::{Path, PathBuf};
@@ -50,6 +51,7 @@ pub use media::{CompatLevel, CompatReport, MediaInfo};
 pub use netcheck::{Demand, TvNetwork, Verdict, VerdictLevel};
 pub use remote::{App, LaunchType};
 pub use rest::{DeviceInfo, PowerState};
+pub use smartthings_auth::{AuthMethod, AuthStatus, StAuth};
 
 /// Crate version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -897,18 +899,15 @@ impl Tv {
 
     // ----- SmartThings ------------------------------------------------------------------
 
-    /// True if a SmartThings token is configured.
+    /// True if SmartThings is usable: an OAuth login, or a personal access token.
     pub fn has_smartthings(&self) -> bool {
-        self.config().smartthings_token.is_some_and(|t| !t.trim().is_empty())
+        self.inner.config.app().has_smartthings()
     }
 
-    /// SmartThings client ([`Error::SmartThings`] if no token is configured).
+    /// SmartThings client: OAuth if connected (it wins), else the personal access token
+    /// ([`Error::SmartThingsNotConnected`] / [`Error::SmartThingsLoginExpired`] otherwise).
     pub fn smartthings(&self) -> Result<smartthings::SmartThings> {
-        let tok = self
-            .config()
-            .smartthings_token
-            .ok_or_else(|| Error::SmartThings("no SmartThings token configured".into()))?;
-        smartthings::SmartThings::new(&tok)
+        smartthings_auth::client_for(&self.inner.config)
     }
 
     /// This TV's SmartThings device: the linked `smartthings_device_id`; else a TV of

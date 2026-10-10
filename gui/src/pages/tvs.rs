@@ -316,7 +316,7 @@ impl TvsSection {
                 if let Some(e) = &r.cloud_error {
                     msg.push_str(&format!(". SmartThings: {e}"));
                 } else if !r.cloud_checked {
-                    msg.push_str(" (LAN only: no SmartThings token)");
+                    msg.push_str(" (LAN only: SmartThings not connected)");
                 }
                 c.toast_for(&msg, 6);
                 *s.candidates.borrow_mut() = r.candidates;
@@ -355,7 +355,7 @@ impl TvsSection {
     fn link_dialog(self: &Rc<Self>, id: &str) {
         let Some(ctx) = self.ctx.upgrade() else { return };
         if !ctx.fleet.has_smartthings() {
-            ctx.toast("Set a SmartThings token in Settings first");
+            ctx.toast("Connect SmartThings on the Device page first");
             return;
         }
         let fleet = ctx.fleet.clone();

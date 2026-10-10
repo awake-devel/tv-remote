@@ -55,7 +55,7 @@ impl PicturePage {
         let empty = adw::StatusPage::builder()
             .icon_name("preferences-desktop-display-symbolic")
             .title("SmartThings not set up")
-            .description("Picture mode and input source are only available through the SmartThings cloud. Paste a personal access token in Device settings to enable this page.")
+            .description("Picture mode and input source are only available through the SmartThings cloud. Connect SmartThings on the Device page (or paste a personal access token there) to enable this page.")
             .build();
         let go = gtk::Button::with_label("Open Device settings");
         go.add_css_class("pill");

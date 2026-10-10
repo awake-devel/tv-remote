@@ -11,7 +11,8 @@ This page covers what you need to start.
 - `Tv` is `Clone + Send + Sync`, and all clones share state. Create it once and clone it into each worker.
 - Errors come back as `tvremote_core::Error` (`thiserror`; its `Display` text is short enough for a toast).
   The library never panics on network or parse errors.
-- Never print `config.token` or `config.smartthings_token`. `Config`'s, `TvEntry`'s and `AppConfig`'s `Debug` output redacts them.
+- Never print `config.token`, `config.smartthings_token` or the secrets of `smartthings_oauth` (client secret, access and
+  refresh tokens). `Config`'s, `TvEntry`'s, `AppConfig`'s and `StOAuth`'s `Debug` output redacts them.
 
 ## Several TVs: `tvremote_core::Fleet`
 
@@ -32,7 +33,8 @@ fleet.start_status_polling(5s, 60s);           // REST power of every TV (Event:
 |---|---|
 | List | `entries() -> Vec<TvEntry>`, `ids()`, `active_id()`, `config() -> AppConfig`, `resolve(sel) -> id` |
 | Manage | `set_active(id)`, `rename(id, name)`, `remove(id)` (stops its channel, deletes its token), `add_candidate(&Candidate) -> id`, `add_host(host, name)` |
-| SmartThings link | `link_smartthings(id, device_id)` (manual; moves the device off any other TV), `unlink_smartthings(id)` (remembered in `smartthings_unlinked`: never auto-linked again), `set_smartthings_token(opt)`, `has_smartthings()`, `smartthings()` |
+| SmartThings link | `link_smartthings(id, device_id)` (manual; moves the device off any other TV), `unlink_smartthings(id)` (remembered in `smartthings_unlinked`: never auto-linked again), `set_smartthings_token(opt)` (legacy PAT), `has_smartthings()` (OAuth connected or PAT), `smartthings()` (OAuth client if connected, else PAT) |
+| SmartThings login | `smartthings_auth() -> StAuth` (import, login, refresh, logout, status; see below), `smartthings_auth_changed()` (call after login/logout/import: drops cloud caches, emits `ConfigChanged` per TV + `FleetChanged`) |
 | Detect | `scan(timeout) -> ScanReport` (LAN + cloud in parallel; applies host changes / last-seen / auto-links; cached for `Fleet::last_scan()`), `Fleet::scan_lan(timeout) -> Vec<LanTv>`, `scan_cloud() -> Vec<CloudTv>`, `Fleet::probe_host(ip)` |
 | Status | `health_all() -> Vec<TvHealth>`; per TV `tv.health()` (REST + SmartThings health; power from SmartThings `switch` when the LAN is silent) |
 | First run | `is_placeholder(&tv)`: switch to `fleet.tv(active)` once a TV exists |
@@ -211,9 +213,56 @@ fleet.link_smartthings(&id, "device-uuid")?;       // or let scan / smartthings_
 tv.set_volume(12)?;                                // DLNA, or SmartThings when the LAN does not answer
 ```
 
-**SmartThings** (hide the page unless `tv.has_smartthings()`)
+**SmartThings login (OAuth)** (`tvremote_core::smartthings_auth`; account-level, one login for all TVs)
+
+Personal access tokens created after 30 Dec 2024 expire after 24 h, so the long-lived path is an OAuth app the user
+registers once with the SmartThings CLI (`npx @smartthings/cli apps:create -i docs/smartthings-app.json -o
+~/.config/samsung-tv/st-app-created.json -j`; redirect URIs `http://localhost:47811/callback` and
+`https://httpbin.org/get`, scopes `r:devices:* w:devices:* x:devices:* r:locations:*`). Config key `smartthings_oauth`
+(`StOAuth { client_id, client_secret, app_id, redirect_uri, access_token, access_expires_at, refresh_token,
+refreshed_at, scope }`, unix seconds). When connected it wins; otherwise `smartthings_token` (PAT) is used.
 ```rust
-tv.update_config(|c| c.smartthings_token = Some(pat))?;
+use tvremote_core::smartthings_auth::*;
+let auth = fleet.smartthings_auth();                       // StAuth: Clone + Send + Sync, no I/O
+auth.import_app(&default_app_file())?;                     // ~/.config/samsung-tv/st-app-created.json → client id/secret/app id
+// Local flow (worker thread): one-shot listener on 127.0.0.1:47811 (GET /callback only, state checked, 5 min).
+let state = random_state();
+match CallbackListener::bind() {                           // Err (AddrInUse) → paste flow below
+    Ok(l) => {
+        let url = auth.authorize_url(&state, &l.redirect_uri())?;   // = LOCAL_REDIRECT
+        if !open_in_browser(&url) { /* show the URL */ }
+        auth.login_with_listener(&l, &state, LOGIN_TIMEOUT, &cancel)?;  // cancel: &AtomicBool → Error::Cancelled
+    }
+    Err(_) => {
+        let url = auth.authorize_url(&state, PASTE_REDIRECT)?;           // https://httpbin.org/get
+        // user pastes the redirected URL, httpbin's JSON, or just the code:
+        auth.login_with_input(&pasted, Some(&state), PASTE_REDIRECT)?;
+    }
+}
+fleet.smartthings_auth_changed();
+let tok = auth.bearer()?;          // valid access token; refreshes first if it expires within 10 min
+auth.refresh()?;                   // spend the refresh token now (daily timer: `tv-remote-tui smartthings refresh --quiet`)
+auth.logout()?;                    // forget tokens, keep the app credentials
+let s: AuthStatus = auth.status(); // method (OAuth/Pat/None), app_imported, connected, needs_login,
+                                   // access_expires_in, refresh_age, pat_present, scope; s.summary() for a status row
+```
+- **Single-use refresh tokens.** Each refresh returns a new pair and invalidates the old refresh token *and* the current
+  access token. Refreshes are serialized by a process-wide mutex plus an exclusive `flock` on `config.json.lock`
+  (`SharedConfig::with_oauth_locked`); the config is re-read inside the lock (another process may have rotated the pair)
+  and the new pair is saved before the access token is used. Every other config save also takes the lock and adopts the
+  file's `smartthings_oauth` first, so a long-running GUI never writes back a stale pair.
+- Every SmartThings call in core goes through `bearer()`; on HTTP 401 the client calls `after_unauthorized(used)` (adopts a
+  token another process stored, else refreshes) and retries once.
+- Token endpoint: `POST https://api.smartthings.com/oauth/token`, form body, HTTP Basic `client_id:client_secret`. Pure,
+  unit-tested builders: `build_authorize_url`, `exchange_request`, `refresh_request`, `parse_token_response`,
+  `apply_token_response`, `needs_refresh`, `parse_app_file`, `code_from_input`, `parse_callback_request`.
+- Errors: `Error::SmartThingsNotConnected`, `Error::SmartThingsLoginExpired` (`invalid_grant` on refresh: tokens are cleared,
+  `refreshed_at` kept, `status().needs_login`; tell the user to log in again), `Error::Http` (network; nothing cleared),
+  `Error::SmartThings` (anything else, e.g. `invalid_client` → re-import the app file). The CLI exits 4 on `SmartThingsLoginExpired`.
+
+**SmartThings devices** (hide the page unless `tv.has_smartthings()`)
+```rust
+// Legacy PAT (used only when OAuth is not connected): tv.update_config(|c| c.smartthings_token = Some(pat))?;
 let st = tv.smartthings()?; let dev = tv.smartthings_tv()?;   // finds the TV and saves its device id
 dev.capabilities / dev.has("custom.picturemode")               // only offer what the device reports
 let s = st.status(&dev.device_id)?;                            // TvStatus { picture_mode, picture_modes, input_source, input_sources, volume, .. }

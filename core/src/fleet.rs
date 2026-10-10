@@ -32,6 +32,7 @@ use crate::error::{Error, Result};
 use crate::events::{Broadcast, CloudState, Event, EventBus, TvEvent};
 use crate::rest::{DeviceInfo, PowerState, Rest};
 use crate::smartthings::{DeviceHealth, SmartThings, StDevice};
+use crate::smartthings_auth::StAuth;
 use crate::Tv;
 
 // ---------------------------------------------------------------------------------------
@@ -892,18 +893,31 @@ impl Fleet {
 
     // ----- SmartThings (account) ---------------------------------------------------------
 
-    /// True if a SmartThings token is configured.
+    /// True if SmartThings is usable: an OAuth login, or a personal access token.
     pub fn has_smartthings(&self) -> bool {
-        self.config().smartthings_token.is_some_and(|t| !t.trim().is_empty())
+        self.config().has_smartthings()
     }
 
-    /// SmartThings client for the account token.
+    /// SmartThings client for the account: OAuth if connected (it wins), else the
+    /// personal access token.
     pub fn smartthings(&self) -> Result<SmartThings> {
-        let tok = self
-            .config()
-            .smartthings_token
-            .ok_or_else(|| Error::SmartThings("no SmartThings token configured".into()))?;
-        SmartThings::new(&tok)
+        crate::smartthings_auth::client_for(&self.inner.config)
+    }
+
+    /// The account's SmartThings OAuth handle (import, login, refresh, logout, status).
+    /// After a login, logout or import, call [`Fleet::smartthings_auth_changed`].
+    pub fn smartthings_auth(&self) -> StAuth {
+        StAuth::new(&self.inner.config)
+    }
+
+    /// Tell every TV and subscriber that the SmartThings credentials changed (cached
+    /// cloud state dropped, [`Event::ConfigChanged`] per TV, [`Event::FleetChanged`]).
+    pub fn smartthings_auth_changed(&self) {
+        for tv in self.cached_tvs() {
+            tv.forget_cloud_cache();
+            tv.event_bus().emit(Event::ConfigChanged);
+        }
+        self.changed();
     }
 
     /// Set or clear the account's SmartThings token.

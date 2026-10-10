@@ -16,7 +16,9 @@ use tvremote_core::cast::{
 };
 use tvremote_core::netcheck::{self, FixKind, PacketProfile};
 use tvremote_core::fleet::{Candidate, Fleet, LanState};
-use tvremote_core::{CastMode, CloudState, CompatLevel, Error, Event, LaunchType, PowerState, Tv, VerdictLevel};
+use tvremote_core::{
+    AuthMethod, CastMode, CloudState, CompatLevel, Error, Event, LaunchType, PowerState, StAuth, Tv, VerdictLevel,
+};
 
 use crate::util::{
     compat_badge, fmt_age, fmt_duration, is_url, mbps, parse_time, terminal_supports_emoji,
@@ -27,8 +29,8 @@ use crate::util::{
 #[command(
     name = "tv-remote-tui",
     version,
-    about = "Remote control for the living-room Samsung TV (TUI + CLI)",
-    long_about = "Remote control for the living-room Samsung TV.\n\n\
+    about = "Remote control for Samsung TVs (TUI + CLI)",
+    long_about = "Remote control for Samsung TVs.\n\n\
                   Without a subcommand, starts the interactive terminal UI. \
                   With a subcommand, runs it and exits (non-zero exit code on error)."
 )]
@@ -132,7 +134,8 @@ pub enum Command {
         #[arg(long)]
         update: bool,
     },
-    /// SmartThings cloud (needs smartthings_token in the config).
+    /// SmartThings cloud: OAuth login (app-import, login, refresh, logout, auth-status)
+    /// and device commands (needs the OAuth login or a legacy smartthings_token).
     #[command(name = "smartthings", alias = "st")]
     SmartThings {
         #[command(subcommand)]
@@ -224,6 +227,31 @@ pub enum StCommand {
     Input { source: String },
     /// Set the sound mode by id or name, any case (see `status` for the list).
     SoundMode { mode: String },
+    /// Import the OAuth app created with the SmartThings CLI (`apps:create -o FILE`).
+    #[command(name = "app-import")]
+    AppImport {
+        /// Output file of `apps:create` (default: ~/.config/samsung-tv/st-app-created.json).
+        file: Option<PathBuf>,
+    },
+    /// Log in to SmartThings (OAuth): opens the browser and waits for the redirect on
+    /// 127.0.0.1:47811 (falls back to pasting the URL if the port is busy).
+    Login {
+        /// Paste the redirected URL (httpbin.org) instead of listening on localhost.
+        #[arg(long)]
+        paste: bool,
+    },
+    /// Refresh the OAuth tokens now (run daily by the systemd user timer). Exits 4 if
+    /// a new login is needed.
+    Refresh {
+        /// Print nothing on success (errors still go to stderr).
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// Forget the OAuth tokens (keeps the imported app, so `login` works again).
+    Logout,
+    /// Connected? Access-token expiry, refresh-token age, PAT fallback.
+    #[command(name = "auth-status")]
+    AuthStatus,
 }
 
 /// Track and quality options shared by `cast` and `netcheck`.
@@ -288,7 +316,8 @@ impl Failure {
 
 impl From<Error> for Failure {
     fn from(e: Error) -> Failure {
-        Failure::new(1, e.to_string())
+        let code = if matches!(e, Error::SmartThingsLoginExpired) { EXIT_RELOGIN } else { 1 };
+        Failure::new(code, e.to_string())
     }
 }
 
@@ -300,6 +329,8 @@ pub const EXIT_INTERRUPTED: i32 = 130;
 pub const EXIT_REFUSED: i32 = 3;
 /// Exit code for a missing confirmation (`nettest` without `--yes`).
 pub const EXIT_USAGE: i32 = 2;
+/// Exit code when the SmartThings OAuth login expired (`smartthings login` again).
+pub const EXIT_RELOGIN: i32 = 4;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 static INTERRUPTS: AtomicU32 = AtomicU32::new(0);
@@ -858,11 +889,174 @@ fn cmd_discover(tv: &Tv, timeout: u64, update: bool, json: bool) -> CliResult {
     Ok(())
 }
 
+/// `1 h 05 min`, `12 min`, `3 days 4 h`.
+fn fmt_span(secs: u64) -> String {
+    match secs {
+        0..=3599 => format!("{} min", secs / 60),
+        3600..=172_799 => format!("{} h {:02} min", secs / 3600, (secs / 60) % 60),
+        _ => format!("{} days {} h", secs / 86_400, (secs / 3600) % 24),
+    }
+}
+
+fn cmd_st_auth(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
+    use tvremote_core::smartthings_auth::{
+        default_app_file, open_in_browser, random_state, CallbackListener, LOGIN_TIMEOUT, PASTE_REDIRECT,
+    };
+    let auth = StAuth::new(&tv.shared_config());
+    match cmd {
+        StCommand::AppImport { file } => {
+            let file = file.unwrap_or_else(default_app_file);
+            let app = auth.import_app(&file)?;
+            println!(
+                "Imported the SmartThings app {}{}.",
+                app.app_name.as_deref().unwrap_or("(unnamed)"),
+                app.app_id.as_deref().map(|a| format!(" ({a})")).unwrap_or_default()
+            );
+            println!("Next: tv-remote-tui smartthings login");
+        }
+        StCommand::Login { paste } => {
+            if !auth.status().app_imported {
+                return Err(Failure::new(
+                    1,
+                    "no OAuth app imported: run `tv-remote-tui smartthings app-import [FILE]` first \
+                     (template: docs/smartthings-app.json)",
+                ));
+            }
+            let state = random_state();
+            let listener = if paste {
+                None
+            } else {
+                match CallbackListener::bind() {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        eprintln!("note: cannot listen on 127.0.0.1:47811 ({e}); switching to the paste flow");
+                        None
+                    }
+                }
+            };
+            let redirect = listener.as_ref().map(|l| l.redirect_uri()).unwrap_or_else(|| PASTE_REDIRECT.to_string());
+            let url = auth.authorize_url(&state, &redirect)?;
+            println!("Open this address, log in to Samsung, pick your location and approve:\n\n  {url}\n");
+            if open_in_browser(&url) {
+                eprintln!("(opening it in your browser)");
+            }
+            match listener {
+                Some(l) => {
+                    eprintln!("Waiting for the browser (up to 5 minutes; Ctrl-C to cancel)…");
+                    match auth.login_with_listener(&l, &state, LOGIN_TIMEOUT, &INTERRUPTED) {
+                        Err(Error::Cancelled) => return Err(Failure::new(EXIT_INTERRUPTED, "login cancelled")),
+                        r => r?,
+                    }
+                }
+                None => {
+                    eprintln!(
+                        "After approving, the browser lands on an httpbin.org page.\n\
+                         Paste its address (or just the code) here and press Enter:"
+                    );
+                    let mut line = String::new();
+                    std::io::stdin()
+                        .read_line(&mut line)
+                        .map_err(|e| Failure::new(1, format!("cannot read the pasted URL: {e}")))?;
+                    auth.login_with_input(&line, Some(&state), PASTE_REDIRECT)?;
+                }
+            }
+            println!("SmartThings connected (OAuth). Tokens refresh automatically; the daily timer keeps the login alive.");
+        }
+        StCommand::Refresh { quiet } => {
+            let st = auth.status();
+            if !st.connected {
+                if st.needs_login {
+                    return Err(Failure::new(EXIT_RELOGIN, Error::SmartThingsLoginExpired.to_string()));
+                }
+                if !quiet {
+                    println!("SmartThings OAuth is not connected: nothing to refresh");
+                }
+                return Ok(());
+            }
+            auth.refresh()?;
+            if !quiet {
+                let st = auth.status();
+                println!(
+                    "Refreshed: access token valid {}",
+                    st.access_expires_in.map(|s| fmt_span(s.max(0) as u64)).unwrap_or_else(|| "–".into())
+                );
+            }
+        }
+        StCommand::Logout => {
+            auth.logout()?;
+            println!("SmartThings OAuth tokens forgotten (the app stays imported; `smartthings login` to reconnect).");
+        }
+        StCommand::AuthStatus => {
+            let st = auth.status();
+            if json {
+                print_json(&to_json(&st));
+                return Ok(());
+            }
+            let method = match st.method {
+                AuthMethod::OAuth => "OAuth",
+                AuthMethod::Pat => "personal access token (legacy)",
+                AuthMethod::None => "none",
+            };
+            println!("Status          {}", st.summary());
+            println!("Using           {method}");
+            println!(
+                "OAuth app       {}",
+                if st.app_imported {
+                    format!("imported{}", st.app_id.as_deref().map(|a| format!(" ({a})")).unwrap_or_default())
+                } else {
+                    "not imported (smartthings app-import)".into()
+                }
+            );
+            println!(
+                "OAuth login     {}",
+                if st.connected {
+                    "connected"
+                } else if st.needs_login {
+                    "expired: run `smartthings login`"
+                } else {
+                    "not connected"
+                }
+            );
+            if st.connected {
+                println!(
+                    "Access token    {}",
+                    match st.access_expires_in {
+                        Some(s) if s > 0 => format!("expires in {}", fmt_span(s as u64)),
+                        Some(_) => "expired (refreshed on next use)".into(),
+                        None => "none (fetched on next use)".into(),
+                    }
+                );
+                println!(
+                    "Refresh token   {}",
+                    st.refresh_age
+                        .map(|a| format!("issued {} (single-use, lasts ~30 days)", fmt_age(a)))
+                        .unwrap_or_else(|| "–".into())
+                );
+            }
+            println!("PAT fallback    {}", if st.pat_present { "present" } else { "none" });
+            if let Some(sc) = &st.scope {
+                println!("Scopes          {sc}");
+            }
+        }
+        _ => return Err(Failure::new(1, "internal: not an auth command")),
+    }
+    Ok(())
+}
+
 fn cmd_smartthings(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
+    if matches!(
+        cmd,
+        StCommand::AppImport { .. } | StCommand::Login { .. } | StCommand::Refresh { .. } | StCommand::Logout | StCommand::AuthStatus
+    ) {
+        return cmd_st_auth(tv, cmd, json);
+    }
     if !tv.has_smartthings() {
+        // Login expired → exit 4 with the "log in again" message.
+        tv.smartthings()?;
         return Err(Failure::new(
             1,
-            "no SmartThings token configured (set smartthings_token in ~/.config/samsung-tv/config.json or in the GUI)",
+            "SmartThings is not set up: `smartthings app-import` then `smartthings login` \
+             (or set a personal access token in the GUI)",
         ));
     }
     let st = tv.smartthings()?;
@@ -936,6 +1130,11 @@ fn cmd_smartthings(tv: &Tv, cmd: StCommand, json: bool) -> CliResult {
             let dev = tv.smartthings_tv()?;
             st.set_sound_mode(&dev, &mode)?;
         }
+        StCommand::AppImport { .. }
+        | StCommand::Login { .. }
+        | StCommand::Refresh { .. }
+        | StCommand::Logout
+        | StCommand::AuthStatus => unreachable!("handled by cmd_st_auth"),
     }
     Ok(())
 }
@@ -1573,6 +1772,37 @@ mod tests {
     }
 
     #[test]
+    fn smartthings_auth_commands_offline() {
+        let dir = std::env::temp_dir().join(format!("tvremote-cli-st-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"tvs": [], "smartthings_token": "fake-pat"}"#).unwrap();
+        let app_file = dir.join("st-app-created.json");
+        std::fs::write(&app_file, r#"{"app": {"appName": "tv-remote-test", "appId": "app-9", "appType": "API_ONLY"},
+            "oauthClientId": "fake-client", "oauthClientSecret": "fake-secret"}"#).unwrap();
+        let (_, tv) = open_tv(Some(&path), None).unwrap();
+        // Nothing to refresh before a login: the timer exits 0.
+        cmd_smartthings(&tv, StCommand::Refresh { quiet: true }, false).unwrap();
+        cmd_smartthings(&tv, StCommand::AppImport { file: Some(app_file) }, false).unwrap();
+        cmd_smartthings(&tv, StCommand::AuthStatus, true).unwrap();
+        cmd_smartthings(&tv, StCommand::Logout, false).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["smartthings_oauth"]["app_id"], "app-9");
+        assert_eq!(v["smartthings_token"], "fake-pat", "the PAT stays as a fallback");
+        // A login that expired (refresh rejected earlier): refresh exits 4.
+        let mut app = tvremote_core::AppConfig::load_from(&path).unwrap();
+        app.smartthings_oauth.as_mut().unwrap().refreshed_at = Some(1);
+        app.save_to(&path).unwrap();
+        let (_, tv) = open_tv(Some(&path), None).unwrap();
+        let err = cmd_smartthings(&tv, StCommand::Refresh { quiet: true }, false).unwrap_err();
+        assert_eq!(err.code, EXIT_RELOGIN);
+        assert_eq!(Failure::from(Error::SmartThingsLoginExpired).code, EXIT_RELOGIN);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn no_subcommand_means_tui() {
         assert!(parse(&[]).command.is_none());
     }
@@ -1631,6 +1861,34 @@ mod tests {
             Some(Command::SmartThings {
                 cmd: StCommand::Input { .. }
             })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "app-import"]).command,
+            Some(Command::SmartThings { cmd: StCommand::AppImport { file: None } })
+        ));
+        assert!(matches!(
+            parse(&["st", "app-import", "/tmp/x.json"]).command,
+            Some(Command::SmartThings { cmd: StCommand::AppImport { file: Some(_) } })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "login"]).command,
+            Some(Command::SmartThings { cmd: StCommand::Login { paste: false } })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "login", "--paste"]).command,
+            Some(Command::SmartThings { cmd: StCommand::Login { paste: true } })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "refresh", "--quiet"]).command,
+            Some(Command::SmartThings { cmd: StCommand::Refresh { quiet: true } })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "logout"]).command,
+            Some(Command::SmartThings { cmd: StCommand::Logout })
+        ));
+        assert!(matches!(
+            parse(&["smartthings", "auth-status"]).command,
+            Some(Command::SmartThings { cmd: StCommand::AuthStatus })
         ));
         let c = parse(&["--json", "status"]);
         assert!(c.json);

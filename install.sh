@@ -1,18 +1,125 @@
 #!/usr/bin/env bash
-# Build and install "TV Remote" (tv-remote GUI + tv-remote-tui) for the current user.
+# Build and install "TV Remote" (tv-remote GUI + tv-remote-tui) for the current user,
+# plus a daily systemd *user* timer that keeps the SmartThings OAuth login alive.
 # No sudo; safe to run again (it rebuilds and overwrites the installed copies).
+#
+#   ./install.sh              build and install
+#   ./install.sh --uninstall  remove the binaries, the launcher entry and the timer
+#                             (the config in ~/.config/samsung-tv is kept)
 set -euo pipefail
 
 here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 bin_dir="${HOME}/.local/bin"
 app_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
+unit_dir="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 desktop_src="${here}/tv-remote.desktop"
 binaries=(tv-remote tv-remote-tui)
+timer_name="tv-remote-st-refresh"
 
 if [[ ${EUID} -eq 0 ]]; then
     echo "error: run this as your normal user, not root" >&2
     exit 1
 fi
+
+# systemctl --user, tolerating a missing user bus (e.g. over ssh or in a container).
+user_systemctl() {
+    systemctl --user "$@" >/dev/null 2>&1
+}
+
+refresh_desktop_db() {
+    if command -v update-desktop-database >/dev/null 2>&1; then
+        update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
+        echo "==> Refreshed the desktop database (${app_dir})"
+    fi
+}
+
+# Daily SmartThings token refresh (refresh tokens are single-use and last ~30 days).
+install_timer() {
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "==> systemctl not found: no refresh timer. Run 'tv-remote-tui smartthings refresh' daily yourself"
+        echo "    (the GUI also refreshes while it runs)."
+        return 0
+    fi
+    mkdir -p "${unit_dir}"
+    cat >"${unit_dir}/${timer_name}.service" <<'EOF'
+[Unit]
+Description=Refresh the TV Remote SmartThings OAuth tokens
+# Retry a failed refresh (e.g. no network yet) every 15 min, at most 4 times in 6 h.
+StartLimitIntervalSec=6h
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/tv-remote-tui smartthings refresh --quiet
+Restart=on-failure
+RestartSec=15min
+# Exit status 4: the login expired; retrying cannot help (log in again).
+RestartPreventExitStatus=4
+EOF
+    cat >"${unit_dir}/${timer_name}.timer" <<'EOF'
+[Unit]
+Description=Daily SmartThings OAuth token refresh for TV Remote
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+EOF
+    echo "==> Installed ${unit_dir}/${timer_name}.{service,timer}"
+    if user_systemctl daemon-reload && user_systemctl enable --now "${timer_name}.timer"; then
+        echo "==> Enabled ${timer_name}.timer (daily)"
+    else
+        echo "note: could not reach the systemd user manager; enable the timer later with:"
+        echo "      systemctl --user daemon-reload && systemctl --user enable --now ${timer_name}.timer"
+    fi
+}
+
+uninstall() {
+    if command -v systemctl >/dev/null 2>&1; then
+        user_systemctl disable --now "${timer_name}.timer" || true
+    fi
+    for f in "${unit_dir}/${timer_name}.timer" "${unit_dir}/${timer_name}.service"; do
+        if [[ -e ${f} ]]; then
+            rm -f -- "${f}"
+            echo "==> Removed ${f}"
+        fi
+    done
+    if command -v systemctl >/dev/null 2>&1; then
+        user_systemctl daemon-reload || true
+    fi
+    for b in "${binaries[@]}"; do
+        if [[ -e "${bin_dir}/${b}" ]]; then
+            rm -f -- "${bin_dir}/${b}"
+            echo "==> Removed ${bin_dir}/${b}"
+        fi
+    done
+    if [[ -e "${app_dir}/tv-remote.desktop" ]]; then
+        rm -f -- "${app_dir}/tv-remote.desktop"
+        echo "==> Removed ${app_dir}/tv-remote.desktop"
+        refresh_desktop_db
+    fi
+    echo "Uninstalled. Your settings and tokens stay in ~/.config/samsung-tv/ (delete it to forget them)."
+}
+
+case "${1:-}" in
+    "") ;;
+    --uninstall | uninstall)
+        uninstall
+        exit 0
+        ;;
+    -h | --help)
+        sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+        exit 0
+        ;;
+    *)
+        echo "error: unknown argument '$1' (try --help)" >&2
+        exit 2
+        ;;
+esac
+
 command -v cargo >/dev/null 2>&1 || { echo "error: cargo not found in PATH" >&2; exit 1; }
 [[ -f ${desktop_src} ]] || { echo "error: missing ${desktop_src}" >&2; exit 1; }
 
@@ -35,11 +142,12 @@ install -m644 "${desktop_src}" "${app_dir}/tv-remote.desktop"
 echo "==> Installed ${app_dir}/tv-remote.desktop"
 
 if command -v update-desktop-database >/dev/null 2>&1; then
-    update-desktop-database "${app_dir}" >/dev/null 2>&1 || true
-    echo "==> Refreshed the desktop database (${app_dir})"
+    refresh_desktop_db
 else
     echo "==> update-desktop-database not found; the launcher will pick the entry up on its next scan"
 fi
+
+install_timer
 
 case ":${PATH}:" in
     *":${bin_dir}:"*) ;;

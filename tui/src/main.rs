@@ -1,5 +1,5 @@
 //! `tv-remote-tui`: interactive terminal UI (no subcommand) and CLI for the
-//! living-room Samsung TV, built on `tvremote_core`.
+//! Samsung TVs, built on `tvremote_core`.
 
 mod app;
 mod browser;

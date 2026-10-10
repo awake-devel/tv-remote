@@ -1,14 +1,21 @@
 //! Device page: the TVs section (several TVs, scan, add, rename, link, remove), then
 //! for the TV in use: device info, power on (WoL / SmartThings) / off, connection, SSDP
-//! rediscovery, and settings (host, MAC, SmartThings token + device link).
+//! rediscovery, and settings (host, MAC, SmartThings OAuth login / legacy token +
+//! device link). Also keeps the SmartThings OAuth login fresh while the app runs.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use adw::prelude::*;
+use gtk::{gio, glib};
 use tvremote_core::smartthings::{SmartThings, StDevice};
-use tvremote_core::{ConnectionState, DeviceInfo, Event, PowerState};
+use tvremote_core::smartthings_auth::{
+    default_app_file, open_in_browser, random_state, CallbackListener, LOGIN_TIMEOUT, PASTE_REDIRECT,
+};
+use tvremote_core::{AuthStatus, ConnectionState, DeviceInfo, Error, Event, PowerState};
 
 use crate::ctx::Ctx;
 use crate::format::{connection_text, non_empty, power_text};
@@ -30,7 +37,18 @@ pub struct DevicePage {
     st_token: adw::PasswordEntryRow,
     st_device: adw::ComboRow,
     st_devices: Rc<RefCell<Vec<StDevice>>>,
+    st_status: adw::ActionRow,
+    st_app: adw::ActionRow,
+    st_connect: gtk::Button,
+    st_disconnect: gtk::Button,
+    /// The "log in again" toast was shown this session.
+    st_warned: Cell<bool>,
+    me: RefCell<std::rc::Weak<DevicePage>>,
 }
+
+/// Background refresh: when the refresh token is older than this (the daily timer may
+/// not run, e.g. without systemd), the GUI refreshes it.
+const GUI_REFRESH_AGE_SECS: u64 = 20 * 3600;
 
 /// The user is typing in this row (don't overwrite it).
 fn editing(w: &impl IsA<gtk::Widget>) -> bool {
@@ -134,9 +152,33 @@ impl DevicePage {
 
         let st = adw::PreferencesGroup::builder()
             .title("SmartThings (optional)")
-            .description("Picture mode and input source go through the SmartThings cloud; power, volume and mute fall back to it. Create a personal access token at account.smartthings.com/tokens and paste it here (one token for all TVs).")
+            .description("Picture mode and input source go through the SmartThings cloud; power, volume and mute fall back to it. One login for all TVs: import the OAuth app you created with the SmartThings CLI (see docs/smartthings-app.json), then connect.")
             .build();
+        let st_status = adw::ActionRow::builder().title("Status").subtitle("…").build();
+        st_status.add_css_class("property");
+        let st_app = adw::ActionRow::builder()
+            .title("OAuth app")
+            .subtitle("Not imported")
+            .build();
+        let st_import = button("Import app file…");
+        st_import.set_tooltip_text(Some("The output of `smartthings apps:create -o …` (st-app-created.json)"));
+        st_app.add_suffix(&st_import);
+        let st_account = adw::ActionRow::builder()
+            .title("Account")
+            .subtitle("Log in once; the access is refreshed automatically")
+            .build();
+        let st_connect = button("Connect SmartThings");
+        st_connect.add_css_class("suggested-action");
+        let st_disconnect = button("Disconnect");
+        st_disconnect.add_css_class("destructive-action");
+        st_account.add_suffix(&st_connect);
+        st_account.add_suffix(&st_disconnect);
         let st_token = adw::PasswordEntryRow::builder().title("Personal access token").build();
+        let st_pat = adw::ExpanderRow::builder()
+            .title("Personal access token (legacy)")
+            .subtitle("Used only when OAuth is not connected; tokens from account.smartthings.com/tokens expire after 24 h")
+            .build();
+        st_pat.add_row(&st_token);
         let st_device = adw::ComboRow::builder()
             .title("TV device")
             .subtitle("Automatic: matched by model and name")
@@ -145,8 +187,11 @@ impl DevicePage {
         let find_dev = button("Find devices");
         find_dev.add_css_class("flat");
         st.set_header_suffix(Some(&find_dev));
-        st.add(&st_token);
+        st.add(&st_status);
+        st.add(&st_app);
+        st.add(&st_account);
         st.add(&st_device);
+        st.add(&st_pat);
         page.add(&st);
 
         let save_group = adw::PreferencesGroup::new();
@@ -171,8 +216,80 @@ impl DevicePage {
             st_token,
             st_device,
             st_devices: Rc::new(RefCell::new(Vec::new())),
+            st_status,
+            st_app,
+            st_connect: st_connect.clone(),
+            st_disconnect: st_disconnect.clone(),
+            st_warned: Cell::new(false),
+            me: RefCell::new(std::rc::Weak::new()),
         });
+        *this.me.borrow_mut() = Rc::downgrade(&this);
         this.load_settings();
+
+        let w = Rc::downgrade(&this);
+        st_import.connect_clicked(move |_| {
+            if let Some(p) = w.upgrade() {
+                p.import_app();
+            }
+        });
+        let w = Rc::downgrade(&this);
+        st_connect.connect_clicked(move |_| {
+            if let Some(p) = w.upgrade() {
+                p.connect_smartthings();
+            }
+        });
+        let w = Rc::downgrade(&this);
+        st_disconnect.connect_clicked(move |_| {
+            let Some(p) = w.upgrade() else { return };
+            let Some(c) = p.ctx.upgrade() else { return };
+            let w2 = Rc::downgrade(&p);
+            c.confirm(
+                "Disconnect SmartThings?",
+                "The OAuth tokens are forgotten (the imported app stays). The personal access token, if any, is used instead.",
+                "Disconnect",
+                true,
+                move || {
+                    let Some(p) = w2.upgrade() else { return };
+                    let Some(c) = p.ctx.upgrade() else { return };
+                    let fleet = c.fleet.clone();
+                    let w3 = Rc::downgrade(&p);
+                    c.spawn(
+                        move |_| {
+                            let r = fleet.smartthings_auth().logout();
+                            fleet.smartthings_auth_changed();
+                            r
+                        },
+                        move |r| {
+                            let Some(p) = w3.upgrade() else { return };
+                            if let Some(c) = p.ctx.upgrade() {
+                                c.toast(&match r {
+                                    Ok(()) => "SmartThings disconnected".to_string(),
+                                    Err(e) => format!("Disconnect: {e}"),
+                                });
+                            }
+                            p.refresh_auth_status();
+                        },
+                    );
+                },
+            );
+        });
+
+        // Keep the OAuth login fresh while the app runs (the systemd timer does it daily
+        // otherwise): soon after start, then every 30 minutes.
+        let w = Rc::downgrade(&this);
+        glib::timeout_add_seconds_local_once(15, move || {
+            if let Some(p) = w.upgrade() {
+                p.background_refresh();
+            }
+        });
+        let w = Rc::downgrade(&this);
+        glib::timeout_add_seconds_local(30 * 60, move || match w.upgrade() {
+            Some(p) => {
+                p.background_refresh();
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
+        });
 
         let w = Rc::downgrade(&this);
         info_refresh.connect_clicked(move |_| {
@@ -283,6 +400,308 @@ impl DevicePage {
             None => "Automatic: matched by model and name".into(),
         };
         self.st_device.set_subtitle(&sub);
+        self.refresh_auth_status();
+    }
+
+    /// Read the OAuth state (worker thread) and update the SmartThings rows.
+    fn refresh_auth_status(&self) {
+        let Some(ctx) = self.ctx.upgrade() else { return };
+        let fleet = ctx.fleet.clone();
+        let (status, app, connect, disconnect) =
+            (self.st_status.clone(), self.st_app.clone(), self.st_connect.clone(), self.st_disconnect.clone());
+        let page = self.self_weak();
+        ctx.spawn(
+            move |_| fleet.smartthings_auth().status(),
+            move |st: AuthStatus| {
+                if st.needs_login {
+                    if let Some(p) = page.upgrade() {
+                        p.warn_relogin();
+                    }
+                }
+                status.set_subtitle(&st.summary());
+                app.set_subtitle(&if st.app_imported {
+                    format!("Imported{}", st.app_id.as_deref().map(|a| format!(" ({a})")).unwrap_or_default())
+                } else {
+                    "Not imported".into()
+                });
+                connect.set_visible(st.app_imported && (!st.connected || st.needs_login));
+                connect.set_label(if st.needs_login { "Log in again" } else { "Connect SmartThings" });
+                disconnect.set_visible(st.connected);
+            },
+        );
+    }
+
+    /// Toast (once per session) that the SmartThings login must be renewed.
+    fn warn_relogin(&self) {
+        let Some(ctx) = self.ctx.upgrade() else { return };
+        if !self.st_warned.replace(true) {
+            ctx.toast_nav("SmartThings login expired: connect again", "Device page", "device");
+        }
+    }
+
+    /// Refresh the OAuth tokens if the refresh token is older than 20 h; warn if the
+    /// login expired.
+    fn background_refresh(&self) {
+        let Some(ctx) = self.ctx.upgrade() else { return };
+        let fleet = ctx.fleet.clone();
+        let page = self.self_weak();
+        ctx.spawn(
+            move |_| {
+                let auth = fleet.smartthings_auth();
+                let st = auth.status();
+                if !(st.connected && st.refresh_age.is_some_and(|a| a >= GUI_REFRESH_AGE_SECS)) {
+                    return Ok(false);
+                }
+                let r = auth.refresh();
+                if r.is_ok() || matches!(r, Err(Error::SmartThingsLoginExpired)) {
+                    fleet.smartthings_auth_changed();
+                }
+                r.map(|()| true)
+            },
+            move |r| {
+                let Some(p) = page.upgrade() else { return };
+                match r {
+                    Ok(_) => {}
+                    Err(Error::SmartThingsLoginExpired) => p.warn_relogin(),
+                    // Network trouble: the next attempt (30 min) or the next use retries.
+                    Err(e) => eprintln!("SmartThings background refresh: {e}"),
+                }
+                p.refresh_auth_status();
+            },
+        );
+    }
+
+    /// "Import app file…": pick the `apps:create` output and store its credentials.
+    fn import_app(&self) {
+        let Some(ctx) = self.ctx.upgrade() else { return };
+        let dialog = gtk::FileDialog::builder()
+            .title("SmartThings app file (st-app-created.json)")
+            .modal(true)
+            .build();
+        let def = default_app_file();
+        if def.exists() {
+            dialog.set_initial_file(Some(&gio::File::for_path(&def)));
+        } else if let Some(dir) = def.parent().filter(|d| d.exists()) {
+            dialog.set_initial_folder(Some(&gio::File::for_path(dir)));
+        }
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("JSON"));
+        filter.add_pattern("*.json");
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        dialog.set_filters(Some(&filters));
+        let w = ctx.weak();
+        let page = self.self_weak();
+        dialog.open(Some(&ctx.window), gio::Cancellable::NONE, move |res| {
+            let Ok(file) = res else { return }; // cancelled
+            let Some(path) = file.path() else { return };
+            let Some(c) = w.upgrade() else { return };
+            let fleet = c.fleet.clone();
+            let w2 = c.weak();
+            let page = page.clone();
+            c.spawn(
+                move |_| {
+                    let r = fleet.smartthings_auth().import_app(&path);
+                    fleet.smartthings_auth_changed();
+                    r
+                },
+                move |r| {
+                    let Some(c) = w2.upgrade() else { return };
+                    match r {
+                        Ok(app) => c.toast(&format!(
+                            "Imported {}: now Connect SmartThings",
+                            app.app_name.as_deref().unwrap_or("the SmartThings app")
+                        )),
+                        Err(e) => c.toast(&format!("Import: {e}")),
+                    }
+                    if let Some(p) = page.upgrade() {
+                        p.refresh_auth_status();
+                    }
+                },
+            );
+        });
+    }
+
+    fn self_weak(&self) -> std::rc::Weak<DevicePage> {
+        self.me.borrow().clone()
+    }
+
+    /// "Connect SmartThings": open the authorize URL, listen on 127.0.0.1:47811 on a
+    /// worker thread, and show a dialog with the URL (copy button) and a paste field.
+    fn connect_smartthings(&self) {
+        let Some(ctx) = self.ctx.upgrade() else { return };
+        let auth = ctx.fleet.smartthings_auth();
+        let state = random_state();
+        let listener = CallbackListener::bind().ok();
+        let redirect = listener.as_ref().map(|l| l.redirect_uri()).unwrap_or_else(|| PASTE_REDIRECT.to_string());
+        let url = match auth.authorize_url(&state, &redirect) {
+            Ok(u) => u,
+            Err(e) => return ctx.toast(&e.to_string()),
+        };
+        let opened = open_in_browser(&url);
+
+        // --- dialog -------------------------------------------------------------------
+        let vbox = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        vbox.set_margin_top(12);
+        vbox.set_margin_bottom(18);
+        vbox.set_margin_start(18);
+        vbox.set_margin_end(18);
+        let intro = gtk::Label::new(Some(&format!(
+            "{}Log in to your Samsung account, pick your location and approve TV Remote.",
+            if opened { "Your browser opened the SmartThings login. " } else { "Open this address in a browser. " }
+        )));
+        intro.set_wrap(true);
+        intro.set_xalign(0.0);
+        vbox.append(&intro);
+        let url_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let url_entry = gtk::Entry::new();
+        url_entry.set_text(&url);
+        url_entry.set_editable(false);
+        url_entry.set_hexpand(true);
+        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy.set_tooltip_text(Some("Copy the address"));
+        url_box.append(&url_entry);
+        url_box.append(&copy);
+        vbox.append(&url_box);
+        let hint = gtk::Label::new(Some(if listener.is_some() {
+            "This window closes by itself once you approve. If the browser cannot reach localhost, paste the address it ended on (or just the code) here:"
+        } else {
+            "Port 47811 is busy, so after approving the browser lands on an httpbin.org page. Paste that page's address (or just the code) here:"
+        }));
+        hint.set_wrap(true);
+        hint.set_xalign(0.0);
+        hint.add_css_class("dim-label");
+        vbox.append(&hint);
+        let paste_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let paste = gtk::Entry::new();
+        paste.set_placeholder_text(Some(if listener.is_some() {
+            "http://localhost:47811/callback?code=…"
+        } else {
+            "https://httpbin.org/get?code=…"
+        }));
+        paste.set_hexpand(true);
+        let use_btn = gtk::Button::with_label("Connect");
+        use_btn.add_css_class("suggested-action");
+        paste_box.append(&paste);
+        paste_box.append(&use_btn);
+        vbox.append(&paste_box);
+        let spinner = adw::Spinner::new();
+        spinner.set_visible(listener.is_some());
+        vbox.append(&spinner);
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&vbox));
+        let dialog = adw::Dialog::builder()
+            .title("Connect SmartThings")
+            .content_width(560)
+            .child(&toolbar)
+            .build();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let done = Rc::new(Cell::new(false));
+        let page = self.self_weak();
+
+        // Shared ending: first success wins; later results are ignored.
+        let finish = {
+            let dialog = dialog.clone();
+            let done = done.clone();
+            let cancel = cancel.clone();
+            let w = ctx.weak();
+            let page = page.clone();
+            Rc::new(move |r: Result<(), Error>, from_paste: bool| {
+                if done.get() {
+                    return;
+                }
+                let Some(c) = w.upgrade() else { return };
+                match r {
+                    Ok(()) => {
+                        done.set(true);
+                        cancel.store(true, Ordering::SeqCst);
+                        dialog.close();
+                        c.toast("SmartThings connected");
+                        if let Some(p) = page.upgrade() {
+                            p.st_warned.set(false);
+                            p.refresh_auth_status();
+                        }
+                    }
+                    Err(Error::Cancelled) => {}
+                    Err(e) => {
+                        c.toast(&format!("SmartThings login: {e}"));
+                        if !from_paste {
+                            // Listener gave up (timeout, refusal): only pasting is left.
+                            done.set(true);
+                            dialog.close();
+                        }
+                    }
+                }
+            })
+        };
+
+        if let Some(l) = listener {
+            let auth = auth.clone();
+            let state = state.clone();
+            let cancel = cancel.clone();
+            let fleet = ctx.fleet.clone();
+            let finish = finish.clone();
+            ctx.spawn(
+                move |_| {
+                    let r = auth.login_with_listener(&l, &state, LOGIN_TIMEOUT, &cancel);
+                    if r.is_ok() {
+                        fleet.smartthings_auth_changed();
+                    }
+                    r
+                },
+                move |r| finish(r, false),
+            );
+        }
+
+        let on_use = {
+            let w = ctx.weak();
+            let paste = paste.clone();
+            let use_btn = use_btn.clone();
+            let finish = finish.clone();
+            move || {
+                let Some(c) = w.upgrade() else { return };
+                let text = paste.text().to_string();
+                if text.trim().is_empty() {
+                    return;
+                }
+                use_btn.set_sensitive(false);
+                let auth = auth.clone();
+                let state = state.clone();
+                let redirect = redirect.clone();
+                let fleet = c.fleet.clone();
+                let finish = finish.clone();
+                let use_btn = use_btn.clone();
+                c.spawn(
+                    move |_| {
+                        let r = auth.login_with_input(&text, Some(&state), &redirect);
+                        if r.is_ok() {
+                            fleet.smartthings_auth_changed();
+                        }
+                        r
+                    },
+                    move |r| {
+                        use_btn.set_sensitive(true);
+                        finish(r, true);
+                    },
+                );
+            }
+        };
+        let on_use = Rc::new(on_use);
+        let f = on_use.clone();
+        use_btn.connect_clicked(move |_| f());
+        let f = on_use.clone();
+        paste.connect_activate(move |_| f());
+        let u = url.clone();
+        copy.connect_clicked(move |b| {
+            b.clipboard().set_text(&u);
+        });
+        let cancel2 = cancel.clone();
+        dialog.connect_closed(move |_| {
+            cancel2.store(true, Ordering::SeqCst);
+        });
+        dialog.present(Some(&ctx.window));
     }
 
     pub fn on_shown(&self) {
@@ -325,15 +744,22 @@ impl DevicePage {
 
     fn find_devices(&self) {
         let Some(ctx) = self.ctx.upgrade() else { return };
-        let Some(token) = non_empty(&self.st_token.text()) else {
-            ctx.toast("Paste a SmartThings token first");
+        // A token typed but not saved yet is tried as is; otherwise the account's
+        // client (OAuth if connected, else the saved token).
+        let typed = non_empty(&self.st_token.text()).filter(|t| Some(t) != ctx.fleet.config().smartthings_token.as_ref());
+        if typed.is_none() && !ctx.fleet.has_smartthings() {
+            ctx.toast("Connect SmartThings (or paste a personal access token) first");
             return;
-        };
+        }
+        let fleet = ctx.fleet.clone();
         let combo = self.st_device.clone();
         let w = ctx.weak();
         let store = self.st_devices.clone();
         ctx.spawn(
-            move |_tv| SmartThings::new(&token).and_then(|st| st.devices()),
+            move |_tv| match typed {
+                Some(token) => SmartThings::new(&token).and_then(|st| st.devices()),
+                None => fleet.smartthings().and_then(|st| st.devices()),
+            },
             move |res| {
                 let Some(c) = w.upgrade() else { return };
                 match res {
@@ -387,8 +813,12 @@ impl DevicePage {
             move |tv| {
                 let old_token = tv.config().smartthings_token;
                 if old_token != token {
-                    // Another account: every link is stale.
+                    // Another account (unless OAuth, which wins, is connected): every link is stale.
+                    let oauth = fleet.config().oauth_connected();
                     fleet.shared_config().update_app(|a| {
+                        if oauth {
+                            return;
+                        }
                         for e in a.tvs.iter_mut() {
                             e.smartthings_device_id = None;
                         }

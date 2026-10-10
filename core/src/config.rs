@@ -5,8 +5,15 @@
 //! ```json
 //! {
 //!   "config_version": 2,
-//!   "name": "Ryoku",                       // client name shown on every TV (account-level)
-//!   "smartthings_token": "…",              // optional SmartThings PAT (account-level)
+//!   "name": "tv-remote",                   // client name shown on every TV (account-level)
+//!   "smartthings_token": "…",              // optional SmartThings PAT (account-level, legacy fallback)
+//!   "smartthings_oauth": {                 // optional SmartThings OAuth app + tokens (account-level; wins over the PAT)
+//!     "client_id": "…", "client_secret": "…", "app_id": "…",
+//!     "redirect_uri": "http://localhost:47811/callback",
+//!     "access_token": "…", "access_expires_at": 1760086400,
+//!     "refresh_token": "…", "refreshed_at": 1760000000,
+//!     "scope": "r:devices:* w:devices:* x:devices:* r:locations:*"
+//!   },
 //!   "active": "tv1",                       // id of the active TV
 //!   "tvs": [
 //!     { "id": "tv1", "name": "TV du salon", "host": "192.0.2.10", "port": 8002,
@@ -25,20 +32,29 @@
 //!
 //! A file without a `tvs` key is the old single-TV format (`host`, `port`, `name`,
 //! `token`, `model`, `mac`, `smartthings_token`, `smartthings_device_id`). It is migrated
-//! in memory on load ([`AppConfig::from_json`]): `name` and `smartthings_token` become
-//! account settings; `host`, `port`, `token`, `model`, `mac` and `smartthings_device_id`
+//! in memory on load ([`AppConfig::from_json`]): `name`, `smartthings_token` and
+//! `smartthings_oauth` (if present) become account settings; `host`, `port`, `token`, `model`, `mac` and `smartthings_device_id`
 //! become the first TV (id `tv1`), which is active. The pairing token moves unchanged,
 //! so the TV does not ask for approval again. Unknown keys are kept. The file is only
 //! rewritten in the new format on the next save.
 //!
 //! The file is written atomically with mode 0600 (it holds tokens). A file that exists
 //! but cannot be parsed is never overwritten (loading fails with [`Error::Config`]).
+//!
+//! # SmartThings OAuth tokens and concurrent processes
+//!
+//! The OAuth refresh token is single-use, and several processes (the GUI, the CLI, the
+//! daily refresh timer) share this file. So the file, not memory, is authoritative for
+//! `smartthings_oauth`: every save through [`SharedConfig`] takes an exclusive `flock`
+//! on `config.json.lock` (see [`lock_path`]) and first adopts that section from the
+//! file, so a process never writes back tokens another process already rotated. Token
+//! refreshes run under the same lock ([`SharedConfig::with_oauth_locked`]).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,7 +72,7 @@ fn default_port() -> u16 {
     8002
 }
 fn default_name() -> String {
-    "Ryoku".to_string()
+    "tv-remote".to_string()
 }
 
 /// When and where a TV was last seen (Unix seconds).
@@ -160,6 +176,89 @@ impl std::fmt::Debug for TvEntry {
     }
 }
 
+/// SmartThings OAuth app credentials and tokens (account-level `smartthings_oauth`).
+///
+/// Written by [`crate::smartthings_auth`]: `client_id`, `client_secret` and `app_id`
+/// come from the SmartThings CLI output (`apps:create`), the tokens from the login and
+/// each refresh. `Debug` redacts the secret and the tokens. Never log them.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StOAuth {
+    /// OAuth client id of the registered app.
+    #[serde(default)]
+    pub client_id: String,
+    /// OAuth client secret. Never log this.
+    #[serde(default)]
+    pub client_secret: String,
+    /// SmartThings app id (informational).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+    /// Redirect URI used for the last login (one of those registered with the app).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+    /// Current access token (24 h). Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    /// When the access token expires (Unix seconds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_expires_at: Option<u64>,
+    /// Current refresh token (single-use, ~30 days). Never log this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// When the current refresh token was issued (login or last refresh, Unix seconds).
+    /// Kept after a rejected refresh (tokens cleared) to tell "login expired" from
+    /// "never logged in".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refreshed_at: Option<u64>,
+    /// Scopes granted by the last token response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    /// Unknown keys, preserved verbatim.
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+impl StOAuth {
+    /// True if the app credentials are present.
+    pub fn has_app(&self) -> bool {
+        !self.client_id.trim().is_empty() && !self.client_secret.trim().is_empty()
+    }
+
+    /// True if logged in (app credentials and a refresh token).
+    pub fn is_connected(&self) -> bool {
+        self.has_app() && self.refresh_token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// Forget the tokens, keep the app credentials. `keep_history` keeps
+    /// `refreshed_at` (a rejected refresh: "login expired") instead of clearing it
+    /// (logout: "not connected").
+    pub fn clear_tokens(&mut self, keep_history: bool) {
+        self.access_token = None;
+        self.access_expires_at = None;
+        self.refresh_token = None;
+        self.scope = None;
+        if !keep_history {
+            self.refreshed_at = None;
+        }
+    }
+}
+
+impl std::fmt::Debug for StOAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let red = |o: Option<&str>| o.filter(|s| !s.is_empty()).map(|_| "<redacted>");
+        f.debug_struct("StOAuth")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &red(Some(&self.client_secret)))
+            .field("app_id", &self.app_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("access_token", &red(self.access_token.as_deref()))
+            .field("access_expires_at", &self.access_expires_at)
+            .field("refresh_token", &red(self.refresh_token.as_deref()))
+            .field("refreshed_at", &self.refreshed_at)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
 /// The whole config file: account settings plus the list of TVs.
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
@@ -172,6 +271,10 @@ pub struct AppConfig {
     /// Optional SmartThings personal access token. Never log this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smartthings_token: Option<String>,
+    /// Optional SmartThings OAuth app and tokens; when connected it wins over
+    /// `smartthings_token`. Never log the secrets (`Debug` redacts them).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smartthings_oauth: Option<StOAuth>,
     /// Id of the active TV.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active: Option<String>,
@@ -189,6 +292,7 @@ impl Default for AppConfig {
             config_version: CONFIG_VERSION,
             name: default_name(),
             smartthings_token: None,
+            smartthings_oauth: None,
             active: None,
             tvs: Vec::new(),
             extra: BTreeMap::new(),
@@ -201,6 +305,7 @@ impl std::fmt::Debug for AppConfig {
         f.debug_struct("AppConfig")
             .field("name", &self.name)
             .field("smartthings_token", &self.smartthings_token.as_ref().map(|_| "<redacted>"))
+            .field("smartthings_oauth", &self.smartthings_oauth)
             .field("active", &self.active)
             .field("tvs", &self.tvs)
             .field("extra_keys", &self.extra.keys().collect::<Vec<_>>())
@@ -241,11 +346,16 @@ impl AppConfig {
         let st_dev = take_str(&mut obj, "smartthings_device_id");
         let name = take_str(&mut obj, "name").unwrap_or_else(default_name);
         let st_tok = take_str(&mut obj, "smartthings_token");
+        let st_oauth = match obj.remove("smartthings_oauth") {
+            Some(Value::Null) | None => None,
+            Some(v) => Some(serde_json::from_value::<StOAuth>(v)?),
+        };
         obj.remove("config_version");
         let mut cfg = AppConfig {
             config_version: CONFIG_VERSION,
             name,
             smartthings_token: st_tok,
+            smartthings_oauth: st_oauth,
             active: None,
             tvs: Vec::new(),
             extra: obj.into_iter().collect(),
@@ -340,6 +450,16 @@ impl AppConfig {
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
         fs::rename(&tmp, path)?;
         Ok(())
+    }
+
+    /// True if SmartThings is usable: OAuth connected, or a personal access token.
+    pub fn has_smartthings(&self) -> bool {
+        self.oauth_connected() || self.smartthings_token.as_deref().is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// True if the OAuth login is connected (it then wins over the PAT).
+    pub fn oauth_connected(&self) -> bool {
+        self.smartthings_oauth.as_ref().is_some_and(StOAuth::is_connected)
     }
 
     /// The active TV entry, if any.
@@ -690,12 +810,24 @@ impl SharedConfig {
     }
 
     /// Mutate the whole config and persist it to the backing file (if any).
+    ///
+    /// With a backing file this holds its `flock` (see [`lock_path`]) and first adopts
+    /// the file's `smartthings_oauth` section, which another process may have rotated.
+    /// Never call it from inside [`SharedConfig::with_oauth_locked`].
     pub fn update_app<R>(&self, f: impl FnOnce(&mut AppConfig) -> R) -> Result<R> {
+        let _lock = match &self.path {
+            Some(p) => Some(FileLock::acquire(p)?),
+            None => None,
+        };
+        let disk = self.path.as_deref().and_then(disk_oauth);
         let (snapshot, r) = {
             let mut guard = self
                 .inner
                 .write()
                 .map_err(|_| Error::Config("config lock poisoned".into()))?;
+            if let Some(d) = disk {
+                guard.smartthings_oauth = d;
+            }
             let r = f(&mut guard);
             guard.fix_active();
             (guard.clone(), r)
@@ -704,6 +836,106 @@ impl SharedConfig {
             snapshot.save_to(p)?;
         }
         Ok(r)
+    }
+
+    /// The `smartthings_oauth` section as the backing file has it now (adopted into
+    /// memory), or the in-memory one without a file. Takes no lock: the file is
+    /// replaced atomically, so the read is consistent.
+    pub fn oauth_from_disk(&self) -> Option<StOAuth> {
+        if let Some(d) = self.path.as_deref().and_then(disk_oauth) {
+            if let Ok(mut g) = self.inner.write() {
+                if g.smartthings_oauth != d {
+                    g.smartthings_oauth = d;
+                }
+            }
+        }
+        self.app().smartthings_oauth
+    }
+
+    /// Run `f` on the `smartthings_oauth` section while holding the process-wide
+    /// SmartThings mutex and the config file's `flock`, so that exactly one thread of
+    /// one process at a time can spend the single-use refresh token. The section is
+    /// re-read from the file first (another process may have rotated it); if `f`
+    /// changes it, the change is saved **immediately** (before `f`'s result is used).
+    /// `f` may do network I/O; it must not call [`SharedConfig::update_app`].
+    pub fn with_oauth_locked<R>(&self, f: impl FnOnce(&mut Option<StOAuth>) -> Result<R>) -> Result<R> {
+        static PROCESS_LOCK: Mutex<()> = Mutex::new(());
+        let _process = PROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _file = match &self.path {
+            Some(p) => Some(FileLock::acquire(p)?),
+            None => None,
+        };
+        let mut cur = self.oauth_from_disk();
+        let before = cur.clone();
+        let res = f(&mut cur);
+        if cur != before {
+            let snapshot = {
+                let mut g = self
+                    .inner
+                    .write()
+                    .map_err(|_| Error::Config("config lock poisoned".into()))?;
+                g.smartthings_oauth = cur;
+                g.clone()
+            };
+            if let Some(p) = &self.path {
+                snapshot.save_to(p)?;
+            }
+        }
+        res
+    }
+}
+
+/// The lock file guarding the config file `path`: `config.json.lock` next to it.
+pub fn lock_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "config.json".into());
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// The `smartthings_oauth` section of the file at `path`; `None` if the file is missing
+/// or unreadable (memory is then kept).
+fn disk_oauth(path: &Path) -> Option<Option<StOAuth>> {
+    let text = fs::read_to_string(path).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    match v.get("smartthings_oauth") {
+        None | Some(Value::Null) => Some(None),
+        Some(o) => serde_json::from_value::<StOAuth>(o.clone()).ok().map(Some),
+    }
+}
+
+/// An exclusive `flock` on [`lock_path`], released on drop.
+struct FileLock {
+    file: fs::File,
+}
+
+impl FileLock {
+    /// Wait up to 60 s for the lock (a holder only keeps it for one token request).
+    fn acquire(config_path: &Path) -> Result<FileLock> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let lp = lock_path(config_path);
+        if let Some(dir) = lp.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o600).open(&lp)?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(FileLock { file }),
+                Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    return Err(Error::Config(format!("{} is locked by another process", lp.display())))
+                }
+                Err(fs::TryLockError::Error(e)) => return Err(Error::Io(e)),
+            }
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
     }
 }
 
@@ -772,11 +1004,74 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    const FAKE_OAUTH: &str = r#"{"client_id": "fake-client", "client_secret": "fake-secret",
+        "app_id": "fake-app", "access_token": "fake-access", "access_expires_at": 2000,
+        "refresh_token": "fake-refresh", "refreshed_at": 1000, "scope": "r:devices:*", "later": 1}"#;
+
+    #[test]
+    fn oauth_section_round_trips_migrates_and_is_redacted() {
+        let oauth: Value = serde_json::from_str(FAKE_OAUTH).unwrap();
+        // New format.
+        let app = AppConfig::from_json(serde_json::json!({"tvs": [], "smartthings_oauth": oauth.clone()})).unwrap();
+        let o = app.smartthings_oauth.clone().unwrap();
+        assert!(o.is_connected() && app.oauth_connected() && app.has_smartthings());
+        assert_eq!(o.extra.get("later"), Some(&Value::from(1)), "unknown keys kept");
+        let dbg = format!("{app:?}");
+        for secret in ["fake-secret", "fake-access", "fake-refresh"] {
+            assert!(!dbg.contains(secret), "{secret} leaked in Debug");
+        }
+        let back = AppConfig::from_json(app.to_json().unwrap()).unwrap();
+        assert_eq!(back, app);
+        // Flat (v1) format: becomes an account setting next to the PAT.
+        let flat = AppConfig::from_json(serde_json::json!({"host": "h", "smartthings_token": "pat", "smartthings_oauth": oauth})).unwrap();
+        assert_eq!(flat.smartthings_oauth.as_ref().unwrap().client_id, "fake-client");
+        assert!(!flat.extra.contains_key("smartthings_oauth"));
+        assert_eq!(flat.smartthings_token.as_deref(), Some("pat"));
+        // App only / PAT only / nothing.
+        let mut only_app = o.clone();
+        only_app.clear_tokens(true);
+        assert!(only_app.has_app() && !only_app.is_connected() && only_app.refreshed_at.is_some());
+        only_app.clear_tokens(false);
+        assert!(only_app.refreshed_at.is_none());
+        let pat = AppConfig { smartthings_token: Some("p".into()), ..Default::default() };
+        assert!(pat.has_smartthings() && !pat.oauth_connected());
+        assert!(!AppConfig::default().has_smartthings());
+    }
+
+    #[test]
+    fn saves_adopt_oauth_tokens_rotated_by_another_process() {
+        let dir = temp("rotate");
+        let path = dir.join("config.json");
+        let app = AppConfig { smartthings_oauth: Some(serde_json::from_str(FAKE_OAUTH).unwrap()), ..Default::default() };
+        app.save_to(&path).unwrap();
+        let shared = SharedConfig::from_app(AppConfig::load_from(&path).unwrap(), Some(path.clone()));
+        // Another process rotates the pair on disk.
+        let mut other = AppConfig::load_from(&path).unwrap();
+        other.smartthings_oauth.as_mut().unwrap().refresh_token = Some("rotated-refresh".into());
+        other.save_to(&path).unwrap();
+        // An unrelated save in this process must not write the stale pair back.
+        shared.update_app(|a| a.name = "Renamed".into()).unwrap();
+        let disk = AppConfig::load_from(&path).unwrap();
+        assert_eq!(disk.name, "Renamed");
+        assert_eq!(disk.smartthings_oauth.unwrap().refresh_token.as_deref(), Some("rotated-refresh"));
+        assert!(lock_path(&path).ends_with("config.json.lock"));
+        // with_oauth_locked saves at once and memory follows.
+        shared
+            .with_oauth_locked(|o| {
+                o.as_mut().unwrap().access_token = Some("new-access".into());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(AppConfig::load_from(&path).unwrap().smartthings_oauth.unwrap().access_token.as_deref(), Some("new-access"));
+        assert_eq!(shared.app().smartthings_oauth.unwrap().access_token.as_deref(), Some("new-access"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn minimal_and_empty_flat_files() {
         let app = AppConfig::from_json(serde_json::json!({"host": "h"})).unwrap();
         assert_eq!(app.tvs[0].port, 8002);
-        assert_eq!(app.name, "Ryoku");
+        assert_eq!(app.name, "tv-remote");
         assert!(app.tvs[0].token.is_none());
         let empty = AppConfig::from_json(serde_json::json!({})).unwrap();
         assert!(empty.tvs.is_empty() && empty.active.is_none());

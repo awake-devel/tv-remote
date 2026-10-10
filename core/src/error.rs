@@ -52,6 +52,13 @@ pub enum Error {
     /// SmartThings cloud API failure (including missing token).
     #[error("SmartThings: {0}")]
     SmartThings(String),
+    /// SmartThings is not set up: no OAuth login and no personal access token.
+    #[error("SmartThings is not connected (Device page → Connect SmartThings, or `tv-remote-tui smartthings login`)")]
+    SmartThingsNotConnected,
+    /// The SmartThings OAuth login is no longer valid (the refresh token was rejected
+    /// with `invalid_grant`, or none is left): the user must log in again.
+    #[error("SmartThings login expired: log in again (Device page → Connect SmartThings, or `tv-remote-tui smartthings login`)")]
+    SmartThingsLoginExpired,
     /// The operation was cancelled by the caller.
     #[error("cancelled")]
     Cancelled,
