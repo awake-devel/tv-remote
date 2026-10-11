@@ -96,6 +96,23 @@ pub fn field(xml: &str, name: &str) -> String {
     }
 }
 
+/// Is this SOAP fault a temporary "not now" (UPnP 701 *Transition not available*, 705
+/// *Transport is locked*)? After a `Seek` the 2025 TV reports `TRANSITIONING` and allows
+/// only `Stop` until it has buffered again (5 to 9 s on a slow link), so `Pause` gets 701. Pure.
+pub fn is_transient_refusal(err: &Error) -> bool {
+    match err {
+        Error::Soap { detail, .. } => {
+            let d = detail.to_ascii_lowercase();
+            d.contains("transition not available") || d.contains("transport is locked")
+        }
+        _ => false,
+    }
+}
+
+/// How many times [`Dlna::pause`] and [`Dlna::seek`] try while the TV refuses
+/// transiently (×0.4 s).
+pub const SETTLE_RETRIES: u32 = 25;
+
 /// `errorDescription` from a SOAP fault body, if present.
 pub fn parse_fault(body: &str) -> Option<String> {
     let d = field(body, "errorDescription");
@@ -305,9 +322,25 @@ impl Dlna {
         self.soap(AVT, "Play", "<Speed>1</Speed>").map(|_| ())
     }
 
-    /// `Pause`.
+    /// An AVTransport action, retried up to [`SETTLE_RETRIES`] times 0.4 s apart while
+    /// the TV answers with a transient refusal ([`is_transient_refusal`]).
+    fn settled(&self, action: &str, args: &str) -> Result<()> {
+        let mut attempt = 0;
+        loop {
+            match self.soap(AVT, action, args) {
+                Ok(_) => return Ok(()),
+                Err(e) if is_transient_refusal(&e) && attempt + 1 < SETTLE_RETRIES => {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(400));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// `Pause` (retried while the TV is still settling, e.g. right after a seek).
     pub fn pause(&self) -> Result<()> {
-        self.soap(AVT, "Pause", "").map(|_| ())
+        self.settled("Pause", "")
     }
 
     /// `Stop`.
@@ -317,12 +350,7 @@ impl Dlna {
 
     /// `Seek` to an absolute position (`REL_TIME`). Not possible for live streams.
     pub fn seek(&self, to: Duration) -> Result<()> {
-        self.soap(
-            AVT,
-            "Seek",
-            &format!("<Unit>REL_TIME</Unit><Target>{}</Target>", format_hms(to)),
-        )
-        .map(|_| ())
+        self.settled("Seek", &format!("<Unit>REL_TIME</Unit><Target>{}</Target>", format_hms(to)))
     }
 
     /// `GetTransportInfo`.
@@ -421,6 +449,11 @@ mod tests {
                      <errorDescription>Transport is locked</errorDescription></UPnPError></detail></s:Fault></s:Body></s:Envelope>";
         assert_eq!(parse_fault(fault).as_deref(), Some("Transport is locked"));
         assert_eq!(parse_fault("<x/>"), None);
+        let soap = |d: &str| Error::Soap { action: "Pause".into(), detail: d.into() };
+        assert!(is_transient_refusal(&soap("Transition not available")), "live 2025 TV, Pause after Seek");
+        assert!(is_transient_refusal(&soap("Transport is locked")));
+        assert!(!is_transient_refusal(&soap("Invalid InstanceID")));
+        assert!(!is_transient_refusal(&Error::Http("timeout".into())));
         let r = "<CurrentTransportState>PLAYING</CurrentTransportState><TrackURI>http://a/b?c=1&amp;d=2</TrackURI>";
         assert_eq!(TransportState::parse(&field(r, "CurrentTransportState")), TransportState::Playing);
         assert_eq!(field(r, "TrackURI"), "http://a/b?c=1&d=2");

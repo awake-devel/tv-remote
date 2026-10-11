@@ -516,7 +516,16 @@ fn dispatch(tv: &Tv, cmd: Command, json: bool) -> CliResult {
             Ok(())
         }
         Command::On { timeout } => {
-            eprintln!("Waking the TV (Wake-on-LAN)…");
+            let wol = tv.config().mac.is_some();
+            let cloud = tv.config().smartthings_device_id.is_some() && tv.has_smartthings();
+            eprintln!(
+                "Waking the TV ({})…",
+                match (wol, cloud) {
+                    (true, true) => "Wake-on-LAN + SmartThings",
+                    (false, true) => "SmartThings",
+                    _ => "Wake-on-LAN",
+                }
+            );
             tv.power_on(Duration::from_secs(timeout))?;
             println!("on");
             Ok(())
@@ -1522,9 +1531,12 @@ fn print_verdict(v: &VerdictOut, emoji: bool) {
         verdict_badge(v.verdict.level, emoji),
         v.verdict.explanation
     );
-    if !v.verdict.fixes.is_empty() {
+    // Like the GUI and the TUI: a re-encode fix is only offered when VAAPI works here
+    // (`cast --reduce` would refuse it with exit code 3).
+    let fixes: Vec<_> = v.verdict.fixes.iter().filter(|f| !f.requires_vaapi || vaapi_available()).collect();
+    if !fixes.is_empty() {
         println!("Fixes:");
-        for f in &v.verdict.fixes {
+        for f in fixes {
             let how = match &f.kind {
                 FixKind::DropExtraTracks { profile } | FixKind::ReduceVideo { profile, .. } => {
                     format!("  [{}]", profile_flags(profile))

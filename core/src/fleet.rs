@@ -397,6 +397,26 @@ pub fn merge_candidates(known: &[TvEntry], lan: &[LanTv], cloud: &[CloudTv]) -> 
     out
 }
 
+/// After [`apply_scan`] saved new links, `after` (a second [`merge_candidates`]) reads
+/// [`MatchKey::Linked`] for them. Put back the key from `before` that made each link, so
+/// the scan report says how a TV was paired (`Mac`, `Uuid`, …). Links that already
+/// existed before the scan stay `Linked`. Pure.
+pub fn relabel_after_links(before: &[Candidate], mut after: Vec<Candidate>) -> Vec<Candidate> {
+    for c in &mut after {
+        if c.matched_by != Some(MatchKey::Linked) {
+            continue;
+        }
+        if let Some(k) = before
+            .iter()
+            .find(|b| b.key == c.key && b.device_id() == c.device_id())
+            .and_then(|b| b.matched_by)
+        {
+            c.matched_by = Some(k);
+        }
+    }
+    after
+}
+
 /// A host change applied by a scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostChange {
@@ -1012,8 +1032,9 @@ impl Fleet {
         if let Ok(ch) = self.inner.config.update_app(|a| apply_scan(a, &cands, unix_now())) {
             report.host_changes = ch;
         }
-        // Re-label known-ness after auto-links.
-        report.candidates = merge_candidates(&self.entries(), &lan, &cloud);
+        // Re-label known-ness after auto-links, but keep the key that made a link in this
+        // scan (else every new link would read `Linked`).
+        report.candidates = relabel_after_links(&cands, merge_candidates(&self.entries(), &lan, &cloud));
         if self.config().tvs != before.tvs {
             for tv in self.cached_tvs() {
                 tv.forget_cloud_cache();
@@ -1232,6 +1253,14 @@ mod tests {
         assert_eq!(tv1.last_seen.lan, Some(1000));
         assert_eq!(tv1.last_seen.cloud, Some(1000));
         assert!(app.entry("tv2").unwrap().smartthings_device_id.is_none());
+        // The report after the link keeps the key that made it (not `Linked`).
+        let again = relabel_after_links(&c, merge_candidates(&app.tvs, &lans, &clouds));
+        assert_eq!(again[0].matched_by, c[0].matched_by);
+        assert_ne!(again[0].matched_by, Some(MatchKey::Linked));
+        // A link that existed before the scan stays `Linked`.
+        let next_scan = merge_candidates(&app.tvs, &lans, &clouds);
+        let next = relabel_after_links(&next_scan, next_scan.clone());
+        assert_eq!(next[0].matched_by, Some(MatchKey::Linked));
 
         // Manual link of tv2 to the third device beats every automatic key.
         app.entry_mut("tv2").unwrap().smartthings_device_id = Some(clouds[2].device.device_id.clone());

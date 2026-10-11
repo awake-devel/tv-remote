@@ -292,6 +292,40 @@ Open questions: the full `keyValue` enum (read it with the capability inspector;
 9. DIAL Netflix body `m=https://www.netflix.com/watch/<id>&source_type=4`: does it start the title?
 10. Art channel: does `get_api_version` answer on the Q7F (one approval prompt)?
 
+### 6.1 Live answers (2026-10-11, 2025 Q7F, PC on 2.4 GHz Wi-Fi)
+
+Status words: **confirmed** (works), **not working**, **unconfirmed** (sent, but needs someone to have watched the screen), **not tested**.
+
+1. **Answered.** `FrameTVSupport: false`, `ImeSyncedSupport: true`, `TokenAuthSupport: true`, `VoiceSupport: true`, `GamePadSupport: true`, `mouseWheelSupport: false`; `isSupport` also has `remote_touchPad`, `remote_voiceControl`, `remote_fourDirections`, `DMP_available`, `EDEN_available` true and `DMP_DRM_PLAYREADY`, `DMP_DRM_WIDEVINE` false. `device.firmwareVersion` is `Unknown`; top-level `version` (`2.0.25`) is the REST API version. Note the contradiction: SmartThings `samsungvd.supportsFeatures.artSupported` is **true**. Other `supportsFeatures`: `imeAdvSupported`, `mediaOutputSupported`, `mobileCamSupported`, `remotelessSupported` true, `wifiUpdateSupport` false, `executableServiceList: ["launchTVPlus"]`.
+2. **Answered.** `GET /v1/capabilities/<id>/1` with the OAuth bearer returns 200 for all seven with the plain id (no namespace path). All are `status: proposed`.
+   - `samsungvd.remoteControl.send(keyValue, keyState?)`: `keyValue` ∈ UP, DOWN, LEFT, RIGHT, OK, BACK, EXIT, MENU, HOME, MUTE, PLAY, PAUSE, STOP, REWIND, FF, PLAY_BACK, SOURCE (no digits, no volume, no power); `keyState` ∈ PRESSED, RELEASED, PRESS_AND_RELEASED (optional).
+   - `custom.tvsearch.search(query: string, url: string)`: **both required**.
+   - `custom.recording`: `recordStart()`, `recordStop()`.
+   - `custom.accessibility.setAccessibility(menuName: string, menuId: string, option?: string)`.
+   - `samsungvd.launchService.launchTVPlus(providerId: string, serviceId: string)`.
+   - `samsungvd.art.setArtOn()`.
+   - `custom.energyType.setEnergySavingLevel(energySavingLevel: integer)`; this TV reports `supportedEnergySavingLevels: [1]`, `energySavingSupport: true`.
+3. **Not working (reads).** `execute` on `/sec/tv/deviceinfo`, `/sec/tv/mode/picture`, `/sec/tv/optioncontrol`, `/sec/tv/uicontrol`, `/sec/tv/contentinfo`: every command answers `COMPLETED`, but `execute.data.value` stays `null` (read 2, 5 and 20 s later, and in the full device status). **Write unconfirmed:** `["/sec/tv/mode/picture", {"x.com.samsung.tv.currentMode": "modeStandard"}]` answered `COMPLETED`; `samsungvd.pictureMode` still read Éco 6 s later. A restore to `modeEco` was sent. Probably not applied: the user saw no picture change at those times (asked 2026-10-11). The picture-mode-via-`execute` lead looks closed for API clients.
+4. **Unconfirmed.** `custom.tvsearch.search("interstellar", "")` answered `COMPLETED`. 6 s later REST showed no visible app. After the TV was turned off and on again (4 h later), the **Browser** was the visible app, which may be where the search landed. The user didn't notice a search screen (they weren't watching closely), so this stays **unconfirmed**; retest with the user watching before building anything.
+5. **Confirmed (LAN up).** `samsungvd.remoteControl.send(["MUTE","PRESS_AND_RELEASED"])` toggled mute (seen over DLNA) in under 2 s. Not tested with the LAN unplugged.
+6. Not tested (skipped by plan).
+7. **Answered.** `/dmr` reports `sec:ProductCap` `Tizen,Y2025,WebURIPlayable,NavigateInPause,…` (it also contains the serial number and a P2P MAC: never log it unredacted).
+   - RenderingControl `X_` actions: `X_GetAspectRatio`, `X_SetAspectRatio`, `X_Move360View`, `X_Zoom360View`, `X_Origin360View`, `X_ControlCaption`, `X_GetCaptionState`, `X_GetServiceCapabilities`, `X_SetZoom`, `X_GetTVSlideShow`, `X_SetTVSlideShow`.
+   - AVTransport `X_` actions: `X_PrefetchURI`, `X_DLNA_GetBytePositionInfo`, `X_GetStoppedReason`, `X_PlayerAppHint`; also `SetNextAVTransportURI`.
+   - **Gone since the 2017 SCPDs:** `X_UpdateAudioSelection`, `X_GetAudioSelection`, `X_UpdateVideoSelection`, `X_GetVideoSelection`, so idea 3.4 #2 (audio track without remux) is dead.
+   - `X_ServiceCapabilities` (evented) is `GetVolume,SetVolume,GetMute,SetMute`.
+   - After a `Seek`, `GetCurrentTransportActions` is just `Stop` for 5 to 9 s (the app now retries Pause and Seek for up to 10 s).
+8. **GENA: confirmed.** `SUBSCRIBE` to `/upnp/event/RenderingControl1` → 200, `SID`, `TIMEOUT: Second-300`; the initial `NOTIFY` (`LastChange` with `Mute`, `Volume`, `X_AspectRatio`, captions, `X_ServiceCapabilities`) arrived in under 1 s; `UNSUBSCRIBE` → 200. Change events from another source were not tested. **SmartThings SSE: not working.** `POST https://api.smartthings.com/subscriptions` (`DEVICEIDS` filter) with the OAuth token → **403**, empty body.
+9. **Unconfirmed.** DIAL `POST /ws/apps/Netflix` with `m=https://www.netflix.com/watch/80057281&source_type=4` → 201. The first time (Netflix cold) it stayed `running` but never `visible`. The second time (warm, from Home, 15:33:15) Netflix became visible. An empty body also → 201 and visible. Whether the title page or playback opened **can't be checked on this TV**: the user has no Netflix account (retest 20:21:09: 201, Netflix visible). Untestable here.
+10. Not tested (art channel would prompt).
+
+Other live findings (2026-10-11):
+
+- **DIAL YouTube: not working.** `POST /ws/apps/YouTube` with `v=<id>` (with or without `&t=`) → **403**, empty body (`API-Version: v1.00`, `Access-Control-Allow-Origin: *`), from the app and from curl, at 15:31:02, 15:31:16, 15:31:37 and 15:31:57. YouTube was seen visible about 6 s after the 15:31:16 try, but the other tries did nothing, so that's **unconfirmed** (maybe someone used the remote). **Retest 20:22:01, 20:22:07, 20:22:13** (two `v=` bodies and one empty body, from Home): **403** each time and YouTube never even started (`running: false` 6 s later). DIAL launch of YouTube is refused on this TV. The app never passed `t` anyway. The app-id launch over the WebSocket works.
+- **REST foreground app: confirmed.** `GET /api/v2/applications/<id>` `visible` goes true after a launch and false after Home.
+- **SmartThings devices: confirmed.** The TV registers a **light sensor** as a separate device (`x.com.st.d.sensor.light`, same model number, `samsungvd.deviceCategory`); it's no longer taken for a TV. A second TV, `[TV] Samsung Q7 Series (55)` (QE55Q7FNA, 2018, Tizen 4.0), is in the same location and room ("Salon"), created 2026-10-10 22:29 UTC, offline since 22:35 UTC. **Confirmed by the user: it's a TV they own** (cloud-only for now; add it with `tvs add` when it's on the LAN).
+- **Cloud volume is stale: confirmed.** `audioVolume` said 0 while the TV was at 3. A cloud `setVolume` unmutes the TV. The TV comes back unmuted after standby.
+
 ---
 
 ## 7. Removed: key-navigation features

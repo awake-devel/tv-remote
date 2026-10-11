@@ -95,7 +95,7 @@ impl DevicePage {
             ("IP address", |d| d.ip.clone()),
             ("Wi-Fi MAC", |d| d.wifi_mac.clone()),
             ("OS", |d| d.os.clone()),
-            ("Firmware", |d| d.version.clone()),
+            ("API version", |d| d.version.clone()),
         ];
         let mut info_rows = Vec::new();
         for (t, f) in fields {

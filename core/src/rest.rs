@@ -63,7 +63,7 @@ pub struct DeviceInfo {
     pub ip: Option<String>,
     /// OS string, e.g. `Tizen`.
     pub os: Option<String>,
-    /// Firmware / API version.
+    /// REST API version (top-level `version`, e.g. `2.0.25`), not the firmware: the 2025 TV reports `device.firmwareVersion` as `Unknown`.
     pub version: Option<String>,
     /// Device unique id (`device.duid`, else `device.id` / top-level `id`), `uuid:…`.
     #[serde(default)]

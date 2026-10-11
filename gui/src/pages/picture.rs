@@ -316,7 +316,17 @@ impl PicturePage {
             |tv| -> tvremote_core::Result<Loaded> {
                 let dev = tv.smartthings_tv()?;
                 let st = tv.smartthings()?;
-                let status = st.status(&dev.device_id)?;
+                let mut status = st.status(&dev.device_id)?;
+                // The cloud's audioVolume can be stale (live 2025 Q7F: 0 while the TV is
+                // at 3), and "+" would then set 1. The TV's own DLNA values win when the
+                // LAN answers.
+                let dlna = tv.dlna();
+                if let Ok(v) = dlna.volume() {
+                    status.volume = Some(v);
+                }
+                if let Ok(m) = dlna.mute() {
+                    status.muted = Some(m);
+                }
                 Ok(Loaded { dev, status })
             },
             move |res| {

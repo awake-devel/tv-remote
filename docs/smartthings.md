@@ -134,6 +134,8 @@ What SmartThings offers depends on the TV model. TV Remote only shows what your 
 
 There is no brightness control through SmartThings on the tested TV.
 
+**Stale volume.** On the same TV, the volume SmartThings reports can lag behind (it said 0 while the TV was at 3). The desktop app's **Picture & Input** page therefore shows the TV's own volume and mute when the TV answers on the LAN. Setting the volume through SmartThings unmutes the TV.
+
 ## Log out
 
 ```sh

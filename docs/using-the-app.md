@@ -85,7 +85,7 @@ Some TVs accept picture and sound mode changes without applying them. The page s
 
 ### Device
 
-- **This TV**: model, resolution, network type, IP address, Wi-Fi MAC, firmware, and the state of the remote connection.
+- **This TV**: model, resolution, network type, IP address, Wi-Fi MAC, REST API version, and the state of the remote connection.
 - **Turn on** and **Turn off**.
 - **Connection**: **Reconnect** the remote channel, and **Rediscover** the TV if its IP address changed.
 - **TVs**: your TVs with their status dots, a **Scan** button, and a **Found** list of new TVs to add. Each TV has a **Use** button and a **⋮** menu: Rename, Link or Unlink SmartThings device, Turn on or off, Remove. See [Several TVs](multiple-tvs.md).

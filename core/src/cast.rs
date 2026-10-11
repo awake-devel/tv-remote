@@ -171,6 +171,8 @@ pub struct CastStatus {
 
 struct SessionInner {
     dlna: Dlna,
+    /// A still image: its position never advances, so the stall guards are off.
+    still: bool,
     server: Option<FileServer>,
     bus: EventBus,
     status: Mutex<CastStatus>,
@@ -396,6 +398,7 @@ pub fn start_cast(dlna: &Dlna, req: CastRequest, bus: EventBus) -> Result<CastSe
 
     let inner = Arc::new(SessionInner {
         dlna: dlna.clone(),
+        still: !watches_progress(&mime),
         server,
         bus: bus.clone(),
         status: Mutex::new(CastStatus {
@@ -420,6 +423,13 @@ pub fn start_cast(dlna: &Dlna, req: CastRequest, bus: EventBus) -> Result<CastSe
         .name("tv-cast-monitor".into())
         .spawn(move || monitor(mon))?;
     Ok(CastSession { inner })
+}
+
+/// Does a cast of this MIME type have a playback position that should advance? False
+/// for images: the TV shows a photo as PLAYING at 0:00 forever, which is not a stall.
+/// Pure.
+pub fn watches_progress(mime: &str) -> bool {
+    !mime.trim().to_ascii_lowercase().starts_with("image/")
 }
 
 /// Seconds without position progress while PLAYING before the live guard fires.
@@ -515,7 +525,7 @@ fn monitor(inner: Arc<SessionInner>) {
                     frozen = 0;
                 }
                 last_pos = pos;
-                if frozen == STALL_SECS && last_stall.is_none_or(|t| t.elapsed() > STALL_REPEAT) {
+                if !inner.still && frozen == STALL_SECS && last_stall.is_none_or(|t| t.elapsed() > STALL_REPEAT) {
                     last_stall = Some(Instant::now());
                     inner.bus.emit(Event::Cast(CastEvent::Stall {
                         message: format!("Playback has not advanced for {STALL_SECS} s (buffering)."),
@@ -541,6 +551,7 @@ fn monitor(inner: Arc<SessionInner>) {
                 trans_polls += 1;
                 last_pos = pos;
                 if trans_polls == 2
+                    && !inner.still
                     && !trans_is_seek
                     && last_stall.is_none_or(|t| t.elapsed() > STALL_REPEAT)
                 {
@@ -570,6 +581,15 @@ fn monitor(inner: Arc<SessionInner>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn images_have_no_progress_to_watch() {
+        // Live 2025 TV: a PNG stays PLAYING at 0:00; that must not read as buffering.
+        assert!(!watches_progress("image/png"));
+        assert!(!watches_progress("Image/JPEG"));
+        assert!(watches_progress("video/x-matroska"));
+        assert!(watches_progress("audio/mpeg"));
+    }
 
     #[test]
     fn didl_duration_format() {

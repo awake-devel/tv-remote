@@ -149,11 +149,21 @@ impl StDevice {
         self.capabilities.iter().any(|c| c == cap)
     }
 
-    /// Heuristic: is it a TV?
+    /// Heuristic: is it a TV? `oic.d.tv`, or a `tvChannel` capability. A device with
+    /// another OCF type is not a TV without `tvChannel`: a 2025 TV registers its light
+    /// sensor as its own device (`x.com.st.d.sensor.light`, same model number, with
+    /// `samsungvd.deviceCategory`). Without an OCF type, a `samsungvd.*` capability other
+    /// than the generic ones counts.
     pub fn is_tv(&self) -> bool {
-        self.ocf_device_type.as_deref() == Some("oic.d.tv")
-            || self.has("tvChannel")
-            || self.capabilities.iter().any(|c| c.starts_with("samsungvd."))
+        const GENERIC: &[&str] = &["samsungvd.deviceCategory", "samsungvd.firmwareVersion"];
+        match self.ocf_device_type.as_deref().map(str::trim) {
+            Some("oic.d.tv") => true,
+            Some(t) if !t.is_empty() => self.has("tvChannel"),
+            _ => {
+                self.has("tvChannel")
+                    || self.capabilities.iter().any(|c| c.starts_with("samsungvd.") && !GENERIC.contains(&c.as_str()))
+            }
+        }
     }
 
     /// Parse one item of `GET /devices`.
@@ -608,6 +618,24 @@ mod tests {
         .unwrap();
         assert!(d.is_tv());
         assert!(d.has("custom.picturemode"));
+
+        // Live 2025 Q7F: the TV's light sensor is a separate device with the TV's model
+        // number and samsungvd.deviceCategory. Not a TV.
+        let sensor = StDevice::from_json(&json!({
+            "deviceId": "00000000-0000-4000-8000-000000000002", "label": "Light Sensor - Salon",
+            "ocf": {"ocfDeviceType": "x.com.st.d.sensor.light", "modelNumber": "QE85Q7FAAUXXC"},
+            "components": [{"id": "main", "capabilities": [{"id": "ocf"}, {"id": "switch"},
+                {"id": "illuminanceMeasurement"}, {"id": "samsungvd.deviceCategory"}]}]
+        }))
+        .unwrap();
+        assert!(!sensor.is_tv());
+        // No OCF type: a TV-specific samsungvd capability still counts, the generic one doesn't.
+        let bare = |caps: &[&str]| {
+            let caps: Vec<_> = caps.iter().map(|c| json!({"id": c})).collect();
+            StDevice::from_json(&json!({"deviceId": "x", "components": [{"id": "main", "capabilities": caps}]})).unwrap()
+        };
+        assert!(bare(&["samsungvd.remoteControl"]).is_tv());
+        assert!(!bare(&["samsungvd.deviceCategory"]).is_tv());
         assert!(!d.has("tvChannel"));
 
         let st = TvStatus::from_status_json(&json!({"components": {"main": {

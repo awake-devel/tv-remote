@@ -141,10 +141,10 @@ With ⚠ or ❌, TV Remote suggests fixes. Each shows the bitrate and verdict yo
 |---|---|---|
 | TV-friendly mode with only the video and one audio track | drops the extra audio and subtitle tracks, which can add several Mbit/s each (a DTS-HD track is about 3–4 Mbit/s) | nothing |
 | …with another audio language | the same, with another track (converted to AC3 if it's DTS) | nothing |
-| Re-encode the video to 40, 25 or 15 Mbit/s HEVC | lowers the video bitrate; HDR is kept, and the result is capped at 4K and 60 fps | VAAPI |
+| Re-encode the video to 40, 25 or 15 Mbit/s HEVC | lowers the video bitrate; HDR is kept, and the result is capped at 4K and 60 fps | VAAPI (only listed when VAAPI works on this PC) |
 | Copy the file to a USB drive or SSD plugged into the TV | no network at all | a USB drive |
 
-Example output from the command line:
+Example output from the command line (on a PC with VAAPI; without it, the re-encode lines are left out):
 
 ```text
 Verdict   ❌ …
@@ -156,7 +156,9 @@ Fixes:
 
 ### While playing
 
-If playback freezes for 4 seconds, or the TV starts buffering in the middle, TV Remote warns you and suggests a fix. The throughput graph on the **Cast** page shows how fast the TV is pulling data.
+If playback freezes for 4 seconds, or the TV starts buffering in the middle, TV Remote warns you and suggests a fix. The throughput graph on the **Cast** page shows how fast the TV is pulling data. A photo stays at 0:00 and doesn't trigger this warning.
+
+After a seek, the TV buffers again and accepts only Stop for a few seconds (5 to 9 s on a slow link). A pause pressed in that window waits for the TV, up to 10 s, instead of failing.
 
 ## When to use a USB drive instead
 
@@ -171,6 +173,6 @@ The TV's own player has the same codec limits: a DTS-only file has no sound from
 ## Tips
 
 - Wire the PC to the router if you can. Then only the TV's link matters.
-- If the TV is on Wi-Fi, 5 GHz and a short distance to the router help most.
+- If the TV is on Wi-Fi, 5 GHz and a short distance to the router help most. The same goes for the PC: on 2.4 GHz Wi-Fi a PC measured about 40 Mbit/s to the TV, against about 160 Mbit/s when wired.
 - The cast server listens on a random TCP port. If you run a firewall on the PC, allow incoming connections from your LAN: see [Troubleshooting](troubleshooting.md#firewall).
 - The ffmpeg log of the last TV-friendly cast is in `~/.cache/tv-remote/ffmpeg-last.log`.

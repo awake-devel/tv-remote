@@ -100,6 +100,14 @@ tv-remote-tui cast film.mkv --friendly
 
 Also check that the chosen audio track is the one you want: `netcheck` lists them.
 
+## A YouTube video doesn't open (HTTP 403)
+
+`youtube`, and the YouTube field on the **Apps** page, use DIAL. On the 2025 Q7F tested on 2026-10-11, the TV answered HTTP 403 to every YouTube DIAL launch, with or without a video id, while Netflix DIAL launches worked. Launch the YouTube app instead (`launch 111299001912`, or its tile on the **Apps** page) and pick the video on the TV.
+
+## The TV is unmuted after turning it on
+
+The TV doesn't keep mute across standby: after `off` then `on` it comes back unmuted at its previous volume. Changing the volume (a volume key, or `volume N` through SmartThings) also unmutes it, as on the TV's own remote.
+
 ## Seeking doesn't work
 
 Seeking only works in direct mode. A TV-friendly stream is converted live, so it can't jump ahead.
