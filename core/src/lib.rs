@@ -51,6 +51,19 @@ pub use media::{CompatLevel, CompatReport, MediaInfo};
 pub use netcheck::{Demand, TvNetwork, Verdict, VerdictLevel};
 pub use remote::{App, LaunchType};
 pub use rest::{DeviceInfo, PowerState};
+
+/// Tizen app id of YouTube.
+pub const YOUTUBE_APP_ID: &str = "111299001912";
+
+/// What [`Tv::youtube`] managed to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum YouTubeOpened {
+    /// The video itself (DIAL accepted the link).
+    Video,
+    /// Only the YouTube app: the TV refused the video link (e.g. the 2025 Q7F answers
+    /// DIAL with 403), so the app was launched over REST instead.
+    AppOnly,
+}
 pub use smartthings_auth::{AuthMethod, AuthStatus, StAuth};
 
 /// Crate version.
@@ -794,9 +807,19 @@ impl Tv {
 
     // ----- DIAL ------------------------------------------------------------------------
 
-    /// Open a YouTube video (id or URL) via DIAL.
-    pub fn youtube(&self, id_or_url: &str) -> Result<()> {
-        self.dial().youtube(id_or_url)
+    /// Open a YouTube video (id or URL) via DIAL. If the TV refuses the link (some TVs
+    /// answer DIAL with 403 and offer no other direct way to open a video), launch the
+    /// YouTube app over REST instead and return [`YouTubeOpened::AppOnly`]. An invalid
+    /// link is still an error.
+    pub fn youtube(&self, id_or_url: &str) -> Result<YouTubeOpened> {
+        match self.dial().youtube(id_or_url) {
+            Ok(()) => Ok(YouTubeOpened::Video),
+            Err(e @ Error::Parse(_)) => Err(e),
+            Err(_) => {
+                self.rest().launch_app(YOUTUBE_APP_ID)?;
+                Ok(YouTubeOpened::AppOnly)
+            }
+        }
     }
 
     /// Launch Netflix via DIAL.

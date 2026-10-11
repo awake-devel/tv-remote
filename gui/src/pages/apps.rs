@@ -56,7 +56,10 @@ impl AppsPage {
                 move |res| {
                     if let Some(c) = weak2.upgrade() {
                         match res {
-                            Ok(()) => c.toast("Opening on YouTube…"),
+                            Ok(tvremote_core::YouTubeOpened::Video) => c.toast("Opening on YouTube…"),
+                            Ok(tvremote_core::YouTubeOpened::AppOnly) => c.toast(
+                                "This TV doesn't accept video links: opened the YouTube app instead",
+                            ),
                             Err(e) => c.toast(&format!("YouTube: {e}")),
                         }
                     }

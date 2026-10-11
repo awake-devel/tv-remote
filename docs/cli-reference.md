@@ -67,7 +67,7 @@ Common keys:
 |---|---|---|
 | `apps` | list installed apps with their ids | `tv-remote-tui apps` |
 | `launch <APP_ID>` | launch an app by id | `tv-remote-tui launch 111299001912` |
-| `youtube <VIDEO>` | open a YouTube video (URL or 11-character id) | `tv-remote-tui youtube https://youtu.be/aaaaaaaaaaa` |
+| `youtube <VIDEO>` | open a YouTube video (URL or 11-character id); if the TV refuses video links, opens the YouTube app instead | `tv-remote-tui youtube https://youtu.be/aaaaaaaaaaa` |
 
 ## Casting
 

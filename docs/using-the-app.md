@@ -53,7 +53,7 @@ When the TV opens its keyboard, the app notices. On this page, it focuses the te
 
 ### Apps
 
-- **Quick launch**: paste a YouTube link or video id to play it on the TV. The **Netflix** row opens the Netflix app.
+- **Quick launch**: paste a YouTube link or video id to play it on the TV. If the TV refuses video links (some do), the YouTube app opens instead and a message says so. The **Netflix** row opens the Netflix app.
 - **Installed apps**: click an app to launch it. The list loads when you open the page with the TV on. Press the refresh button to load it again.
 
 The list comes from a set of well-known app ids that the TV is asked about (see [App list empty](troubleshooting.md#the-app-list-is-empty-or-incomplete)).

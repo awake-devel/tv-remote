@@ -92,7 +92,7 @@ tv.start_status_polling(Duration::from_secs(5)); // emits Event::Power on change
 | REST | `device_info() -> DeviceInfo`, `power_state() -> PowerState` (never errors; unreachable = `Off`), `cached_device_info()` / `tv_network() -> Option<TvNetwork>` (no I/O; filled by `device_info`, `power_state` and the status poller), `app_status(id)`, `close_app(id)` |
 | Power | `power_on(timeout)` (WoL every 2 s, plus `KEY_POWER` if in network standby; polls until on), `power_off()` |
 | Volume (DLNA) | `volume()`, `set_volume(u8)`, `mute()`, `set_mute(bool)` |
-| DIAL | `youtube(id_or_url)`, `netflix()`; `dial().launch(app, body)` |
+| DIAL | `youtube(id_or_url) -> YouTubeOpened` (`Video`, or `AppOnly` when the TV refuses the link and the app was launched over REST instead), `netflix()`; `dial().launch(app, body)` |
 | Cast | `probe_media(path)`, `cast(CastRequest) -> CastSession`, `current_cast()`, `transport()` |
 | Network check | `analyze_demand(&info, on_progress, on_done) -> DemandJob`, `network_verdict(&info, &mode, packets, tv.tv_network()) -> (Demand, Verdict)`, `measure_network(&cancel, &progress)` |
 | SmartThings | `has_smartthings()`, `smartthings() -> SmartThings`, `smartthings_tv() -> StDevice` (linked device; else matched against this TV, or the single TV of a single-TV setup; saved as the link), `linked_smartthings_device()` (never auto-links), `smartthings_status()` |
@@ -138,7 +138,7 @@ any other unknown name is an error.
 ```rust
 let apps = tv.installed_apps()?;                // Vec<App { app_id, name, app_type, icon }>
 tv.launch_app(&apps[0])?;
-tv.youtube("https://youtu.be/dQw4w9WgXcQ")?;    // DIAL
+tv.youtube("https://youtu.be/dQw4w9WgXcQ")?;    // DIAL; falls back to launching the app
 ```
 
 **Browse → probe → profile → netcheck → cast → monitor**

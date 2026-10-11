@@ -354,7 +354,12 @@ fn command_worker(shared: Arc<Mutex<Tv>>, rx: Receiver<Cmd>, tx: Sender<Msg>) {
                 Err(e) => log(&tx, Level::Error, format!("Launch {}: {e}", app.name)),
             },
             Cmd::YouTube(u) => match tv.youtube(&u) {
-                Ok(()) => log(&tx, Level::Info, "Opened on YouTube"),
+                Ok(tvremote_core::YouTubeOpened::Video) => log(&tx, Level::Info, "Opened on YouTube"),
+                Ok(tvremote_core::YouTubeOpened::AppOnly) => log(
+                    &tx,
+                    Level::Warn,
+                    "This TV doesn't accept YouTube video links: opened the YouTube app instead",
+                ),
                 Err(e) => log(&tx, Level::Error, format!("YouTube: {e}")),
             },
         }

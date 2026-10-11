@@ -492,7 +492,12 @@ fn dispatch(tv: &Tv, cmd: Command, json: bool) -> CliResult {
                     format!("not a YouTube URL or video id: {video}"),
                 ));
             }
-            tv.youtube(&video)?;
+            match tv.youtube(&video)? {
+                tvremote_core::YouTubeOpened::Video => println!("Opened on YouTube"),
+                tvremote_core::YouTubeOpened::AppOnly => eprintln!(
+                    "note: this TV doesn't accept YouTube video links; opened the YouTube app instead"
+                ),
+            }
             Ok(())
         }
         Command::Volume { level } => {

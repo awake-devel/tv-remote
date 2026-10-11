@@ -59,7 +59,7 @@ Recent firmware ignores the remote-channel request that used to list installed a
 
 Text input only reaches the TV's system keyboard: the web browser, settings, and most search boxes. YouTube and Netflix draw their own on-screen keyboard, which ignores typed text. Use the arrows and OK there.
 
-For YouTube, you can also open a video directly:
+For YouTube, you can also try opening a video directly (on TVs that refuse video links, this opens the YouTube app instead):
 
 ```sh
 tv-remote-tui youtube https://youtu.be/aaaaaaaaaaa
@@ -102,7 +102,9 @@ Also check that the chosen audio track is the one you want: `netcheck` lists the
 
 ## A YouTube video doesn't open (HTTP 403)
 
-`youtube`, and the YouTube field on the **Apps** page, use DIAL. On the 2025 Q7F tested on 2026-10-11, the TV answered HTTP 403 to every YouTube DIAL launch, with or without a video id, while Netflix DIAL launches worked. Launch the YouTube app instead (`launch 111299001912`, or its tile on the **Apps** page) and pick the video on the TV.
+`youtube`, and the YouTube field on the **Apps** page, open the video with DIAL. Some TVs refuse that: the 2025 Q7F tested on 2026-10-11 answers HTTP 403 to every YouTube DIAL launch, even when logged in to YouTube, and has no other direct way to open a video (its other launch commands open YouTube's home screen or are ignored).
+
+When the TV refuses the link, TV Remote opens the **YouTube app** instead and says so ("this TV doesn't accept YouTube video links"). Pick the video on the TV. On TVs that accept DIAL, the video opens directly.
 
 ## The TV is unmuted after turning it on
 
