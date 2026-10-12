@@ -73,8 +73,19 @@ pub fn discover(timeout: Duration) -> Result<Vec<DiscoveredDevice>> {
     let _ = sock.set_multicast_ttl_v4(2);
     let target: SocketAddr = "239.255.255.250:1900".parse().map_err(crate::error::Error::parse)?;
     let mx = timeout.as_secs().clamp(1, 5) as u32;
+    let mut sent = 0;
+    let mut send_err = None;
     for st in [ST_SAMSUNG_REMOTE, ST_MEDIA_RENDERER] {
-        let _ = sock.send_to(msearch_request(st, mx).as_bytes(), target);
+        match sock.send_to(msearch_request(st, mx).as_bytes(), target) {
+            Ok(_) => sent += 1,
+            Err(e) => send_err = Some(e),
+        }
+    }
+    // Nothing went out (no network, multicast refused): say so instead of "found nothing".
+    if sent == 0 {
+        if let Some(e) = send_err {
+            return Err(crate::error::Error::Io(e));
+        }
     }
     let mut found: Vec<DiscoveredDevice> = Vec::new();
     let deadline = Instant::now() + timeout;
