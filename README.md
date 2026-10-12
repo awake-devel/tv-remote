@@ -87,7 +87,11 @@ file manager when asked).
   network security config cannot scope cleartext to IP ranges, so it is allowed for the app
   (`res/xml/network_security_config.xml`). The remote channel is TLS (wss :8002, the TV's
   self-signed certificate is accepted, as on the desktop).
+- Android 17 (API 37) puts LAN access behind the runtime permission `ACCESS_LOCAL_NETWORK`;
+  without it every socket to the TV fails with EPERM. The app asks on first start and the TVs
+  screen offers it again.
 - The scan holds a Wi-Fi multicast lock (`CHANGE_WIFI_MULTICAST_STATE`).
+- `cd rust && cargo run --example scan` runs the app's scan from the PC (throw-away config).
 - The pairing prompt on the TV names the phone "TV Remote (<model>)". The app only connects
   by itself to a TV that is already paired; the first connection follows "Pair" or a key press.
 - Config: `files/config.json` in the app's private storage (same format as the desktop's).
