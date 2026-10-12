@@ -582,9 +582,12 @@ impl TvRemote {
         Ok(self.tv.launch_app(&app.into())?)
     }
 
-    /// Launch an app by id (deep-link launch, as for web apps).
+    /// Launch an app by id: REST first (the remote channel's launch is ignored by
+    /// Tizen 2025), then the remote channel as a deep-link launch.
     pub fn launch_app_id(&self, app_id: String) -> Res<()> {
-        Ok(self.tv.launch_app_id(&app_id, LaunchType::DeepLink, None)?)
+        let app = App { app_id, name: String::new(), app_type: 2, icon: None };
+        debug_assert_eq!(app.launch_type(), LaunchType::DeepLink);
+        Ok(self.tv.launch_app(&app)?)
     }
 
     /// Open a YouTube video (id or URL) over DIAL; falls back to opening the app.
