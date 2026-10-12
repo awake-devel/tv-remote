@@ -67,10 +67,18 @@ jobs:
           distribution: temurin
           java-version: "21"
 
+      # The runner's preinstalled sdkmanager can be too old to list platform 37, so use the
+      # same command-line tools as the local setup (SHA-256 of Google's archive, whose SHA-1
+      # matches the one in Google's repository index).
       - name: Install the SDK platform, build-tools and NDK
         run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" "build-tools;37.0.0" "ndk;29.0.14206865"
+          zip="commandlinetools-linux-16111833_latest.zip"
+          curl -fsSLo "$RUNNER_TEMP/$zip" "https://dl.google.com/android/repository/$zip"
+          echo "0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8  $RUNNER_TEMP/$zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/$zip" -d "$RUNNER_TEMP/sdk-tools"
+          sdkmanager="$RUNNER_TEMP/sdk-tools/cmdline-tools/bin/sdkmanager --sdk_root=$ANDROID_HOME"
+          yes | $sdkmanager --licenses > /dev/null
+          $sdkmanager "platforms;android-37.0" "build-tools;37.0.0" "ndk;29.0.14206865"
 
       - name: Install the Rust Android targets and cargo-ndk
         run: |
