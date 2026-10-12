@@ -45,7 +45,7 @@ import fr.ryoku.tvremote.core.TvSummary
 import fr.ryoku.tvremote.logic.UiState
 
 @Composable
-fun TvsScreen(state: UiState, vm: MainViewModel) {
+fun TvsScreen(state: UiState, vm: MainViewModel, onRequestLan: () -> Unit) {
     var adding by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<TvSummary?>(null) }
     var removing by remember { mutableStateOf<TvSummary?>(null) }
@@ -56,6 +56,25 @@ fun TvsScreen(state: UiState, vm: MainViewModel) {
     ) {
         item {
             Text("Your TVs", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp))
+        }
+        if (!state.lanAllowed) {
+            item {
+                ElevatedCard(Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Local network access is off", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Android asks before an app may talk to devices on your Wi-Fi. The remote needs it to find and control the TV.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        Button(onClick = onRequestLan) { Text("Allow") }
+                        Text(
+                            "If nothing appears, allow it in Settings → Apps → TV Remote → Permissions.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
         }
         if (state.tvs.isEmpty()) {
             item {

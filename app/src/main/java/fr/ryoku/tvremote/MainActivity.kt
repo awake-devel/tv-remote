@@ -1,11 +1,14 @@
 package fr.ryoku.tvremote
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
@@ -50,6 +53,9 @@ import fr.ryoku.tvremote.ui.RemoteScreen
 import fr.ryoku.tvremote.ui.TouchpadScreen
 import fr.ryoku.tvremote.ui.TvsScreen
 
+/** Android 17: local network protection (ACCESS_LOCAL_NETWORK). */
+private const val LOCAL_NETWORK_SDK = 37
+
 private enum class Tab(val label: String, val icon: ImageVector) {
     Remote("Remote", Glyphs.Tv),
     Touchpad("Touchpad", Glyphs.Mouse),
@@ -59,6 +65,20 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 
 class MainActivity : ComponentActivity() {
     private val vm: MainViewModel by viewModels()
+    private var askedLan = false
+
+    private val lanPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        vm.onLanPermission(it)
+    }
+
+    private fun lanGranted(): Boolean =
+        Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK ||
+            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+
+    /** Android 17+ asks before an app may reach devices on the local network (the TV). */
+    fun requestLan() {
+        if (lanGranted()) vm.onLanPermission(true) else lanPermission.launch(Manifest.permission.ACCESS_LOCAL_NETWORK)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -67,7 +87,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             AppTheme {
                 val state by vm.state.collectAsStateWithLifecycle()
-                Root(state, vm)
+                Root(state, vm, onRequestLan = ::requestLan)
             }
         }
     }
@@ -79,6 +99,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        val granted = lanGranted()
+        vm.onLanPermission(granted)
+        if (!granted && !askedLan) {
+            askedLan = true
+            requestLan()
+        }
         vm.onForeground()
     }
 
@@ -96,7 +122,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Root(state: UiState, vm: MainViewModel) {
+private fun Root(state: UiState, vm: MainViewModel, onRequestLan: () -> Unit) {
     var tab by rememberSaveable { mutableStateOf(Tab.Remote) }
     var typing by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
@@ -132,7 +158,7 @@ private fun Root(state: UiState, vm: MainViewModel) {
                     Tab.Remote -> RemoteScreen(state, vm, onOpenTvs = { tab = Tab.Tvs }, onKeyboard = { typing = true })
                     Tab.Touchpad -> TouchpadScreen(vm, onKeyboard = { typing = true })
                     Tab.Apps -> AppsScreen(state, vm)
-                    Tab.Tvs -> TvsScreen(state, vm)
+                    Tab.Tvs -> TvsScreen(state, vm, onRequestLan)
                 }
             }
         }

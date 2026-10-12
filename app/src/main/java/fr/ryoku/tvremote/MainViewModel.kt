@@ -115,6 +115,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         tv?.close()
     }
 
+    fun onLanPermission(granted: Boolean) {
+        val was = _state.value.lanAllowed
+        _state.update { it.copy(lanAllowed = granted) }
+        if (granted && !was && foreground) viewModelScope.launch(io) { if (core != null) startForegroundWork() }
+    }
+
     // ----- TV list ----------------------------------------------------------------------
 
     private fun reloadTvs() {
@@ -172,6 +178,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun scan() {
         if (_state.value.scanning) return
         val c = core ?: return
+        if (!_state.value.lanAllowed) return message("Allow access to the local network first")
         _state.update { it.copy(scanning = true, scanError = null) }
         viewModelScope.launch(io) {
             val app = getApplication<Application>()

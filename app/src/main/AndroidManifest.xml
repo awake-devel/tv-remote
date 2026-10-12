@@ -7,6 +7,9 @@
     <!-- SSDP discovery: receive multicast while scanning. -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Android 17 (API 37) local network protection: talking to the TV (SSDP, REST,
+         WebSocket, Wake-on-LAN) needs this runtime permission. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <application
         android:name=".TvRemoteApp"

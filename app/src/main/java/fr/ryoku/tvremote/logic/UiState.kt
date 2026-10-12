@@ -29,6 +29,8 @@ data class UiState(
     val scanned: Boolean = false,
     /** The TV's on-screen keyboard is open: offer text entry. */
     val keyboardShown: Boolean = false,
+    /** Android 17+: the local network permission is granted (always true before). */
+    val lanAllowed: Boolean = true,
 ) {
     val active: TvSummary? get() = tvs.firstOrNull { it.active }
     val activeId: String? get() = active?.id
