@@ -20,6 +20,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -31,6 +32,8 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
@@ -61,6 +64,8 @@ fun KeyButton(
     container: Color = MaterialTheme.colorScheme.secondaryContainer,
     content: Color = MaterialTheme.colorScheme.onSecondaryContainer,
     enabled: Boolean = true,
+    iconSize: Dp = 24.dp,
+    labelSize: TextUnit = TextUnit.Unspecified,
 ) {
     val haptic = rememberHaptic()
     val action by rememberUpdatedState(onPress)
@@ -70,7 +75,9 @@ fun KeyButton(
         shape = shape,
         color = if (pressed) MaterialTheme.colorScheme.primary else container,
         contentColor = if (pressed) MaterialTheme.colorScheme.onPrimary else content,
+        // Disabled: dimmed (no TV yet, or a power command is running).
         modifier = modifier
+            .alpha(if (enabled) 1f else 0.45f)
             .semantics {
                 role = Role.Button
                 contentDescription = description
@@ -101,11 +108,11 @@ fun KeyButton(
     ) {
         Box(contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                if (icon != null) Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp))
+                if (icon != null) Icon(icon, contentDescription = null, modifier = Modifier.size(iconSize))
                 if (label != null) {
                     Text(
                         label,
-                        fontSize = if (icon != null) 11.sp else 15.sp,
+                        fontSize = if (labelSize != TextUnit.Unspecified) labelSize else if (icon != null) 11.sp else 15.sp,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                     )

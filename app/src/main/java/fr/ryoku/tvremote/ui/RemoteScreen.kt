@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import fr.ryoku.tvremote.MainViewModel
 import fr.ryoku.tvremote.core.RemoteKey
 import fr.ryoku.tvremote.core.TvPower
@@ -190,14 +191,15 @@ private fun DPad(key: (RemoteKey) -> Unit) {
         val shape = RoundedCornerShape(28.dp)
         val bg = MaterialTheme.colorScheme.surfaceContainerHigh
         val fg = MaterialTheme.colorScheme.onSurface
-        KeyButton({ key(RemoteKey.UP) }, arrow.align(Alignment.TopCenter), icon = Icons.Filled.KeyboardArrowUp, description = "Up", repeat = true, shape = shape, container = bg, content = fg)
-        KeyButton({ key(RemoteKey.DOWN) }, arrow.align(Alignment.BottomCenter), icon = Icons.Filled.KeyboardArrowDown, description = "Down", repeat = true, shape = shape, container = bg, content = fg)
-        KeyButton({ key(RemoteKey.LEFT) }, arrow.align(Alignment.CenterStart), icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, description = "Left", repeat = true, shape = shape, container = bg, content = fg)
-        KeyButton({ key(RemoteKey.RIGHT) }, arrow.align(Alignment.CenterEnd), icon = Icons.AutoMirrored.Filled.KeyboardArrowRight, description = "Right", repeat = true, shape = shape, container = bg, content = fg)
+        KeyButton({ key(RemoteKey.UP) }, arrow.align(Alignment.TopCenter), icon = Icons.Filled.KeyboardArrowUp, description = "Up", repeat = true, shape = shape, container = bg, content = fg, iconSize = 40.dp)
+        KeyButton({ key(RemoteKey.DOWN) }, arrow.align(Alignment.BottomCenter), icon = Icons.Filled.KeyboardArrowDown, description = "Down", repeat = true, shape = shape, container = bg, content = fg, iconSize = 40.dp)
+        KeyButton({ key(RemoteKey.LEFT) }, arrow.align(Alignment.CenterStart), icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft, description = "Left", repeat = true, shape = shape, container = bg, content = fg, iconSize = 40.dp)
+        KeyButton({ key(RemoteKey.RIGHT) }, arrow.align(Alignment.CenterEnd), icon = Icons.AutoMirrored.Filled.KeyboardArrowRight, description = "Right", repeat = true, shape = shape, container = bg, content = fg, iconSize = 40.dp)
         KeyButton(
             { key(RemoteKey.ENTER) },
             Modifier.fillMaxSize(0.42f),
             label = "OK",
+            labelSize = 22.sp,
             shape = CircleShape,
             container = MaterialTheme.colorScheme.primaryContainer,
             content = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -215,9 +217,9 @@ private fun Rocker(label: String, up: () -> Unit, down: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         val shape = RoundedCornerShape(38.dp)
-        KeyButton(up, Modifier.size(76.dp), label = "+", description = "$label up", repeat = true, shape = shape)
+        KeyButton(up, Modifier.size(76.dp), label = "+", description = "$label up", repeat = true, shape = shape, labelSize = 30.sp)
         Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSecondaryContainer)
-        KeyButton(down, Modifier.size(76.dp), label = "−", description = "$label down", repeat = true, shape = shape)
+        KeyButton(down, Modifier.size(76.dp), label = "−", description = "$label down", repeat = true, shape = shape, labelSize = 30.sp)
     }
 }
 
