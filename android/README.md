@@ -1,7 +1,7 @@
 # TV Remote for Android
 
-An Android remote for Samsung Tizen TVs, built on the Rust core of
-[tv-remote](../tv-remote) (`tvremote_core`) through UniFFI bindings, with a Jetpack Compose
+An Android remote for Samsung Tizen TVs, built on this repository's Rust core
+([`core/`](../core), `tvremote_core`) through UniFFI bindings, with a Jetpack Compose
 (Material 3) UI. Package `fr.ryoku.tvremote`, app name "TV Remote", minSdk 26, targetSdk 37.
 
 Milestone 1, "Remote first":
@@ -37,10 +37,13 @@ app/               Android app (Compose)
     ui/            screens and controls
 ```
 
-The core comes from the `android-core` branch of tv-remote, checked out next to this
-repository: `../tv-remote-android-core/core` (see `rust/Cargo.toml`). That branch adds a
-`rustls` TLS feature (no OpenSSL to cross-compile), `config::set_cache_dir` and
-`wol::set_broadcast_hints`.
+The FFI crate uses the core by path (`../../core`) with its `rustls` TLS feature (no
+OpenSSL to cross-compile), plus the platform hooks `config::set_cache_dir` and
+`wol::set_broadcast_hints` (see `core/API.md`). `android/rust` is not a member of the root
+Cargo workspace: it has its own `Cargo.lock` and `target/`, so the desktop builds keep
+native-tls and never compile UniFFI.
+
+Everything here is covered by the repository's MIT license (`../LICENSE`).
 
 ## Toolchain
 
@@ -70,9 +73,15 @@ source ~/Android/env.sh
 ./gradlew assembleDebug                         # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew assembleDebug -PrustAbis=arm64-v8a    # one ABI: faster while developing
 ./gradlew testDebugUnitTest                     # Kotlin/JVM tests (pure logic)
+./gradlew lintDebug                             # Android lint
+./gradlew connectedDebugAndroidTest             # Compose UI tests on a phone, over a fake TV backend
 (cd rust && cargo test && cargo clippy --all-targets)   # Rust FFI tests (host, offline)
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
+
+Instrumented tests replace the app's backend with an in-memory fake (no TV traffic) while
+they run; the app stays installed afterwards (its pairing survives), and the test APK is
+removed with `adb uninstall fr.ryoku.tvremote.test`.
 
 The Gradle build runs `cargo ndk` for arm64-v8a, armeabi-v7a and x86_64 (release profile)
 and `uniffi-bindgen generate --library` on a host build of the crate; the Kotlin bindings

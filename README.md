@@ -55,6 +55,25 @@ the GUI refreshes them while it runs, and `install.sh` adds a daily systemd user
 `tv-remote-tui smartthings refresh --quiet`). If the login expires anyway, connect again. `smartthings logout` forgets the
 tokens; a personal access token (Device page → *Personal access token (legacy)*) is still used when OAuth is not connected.
 
+## Android
+
+[`android/`](android/README.md) is an Android remote (Jetpack Compose, package `fr.ryoku.tvremote`) on the same core,
+through UniFFI bindings. Milestone 1, "remote first", is done: discovery and pairing, every key, text, touchpad, power
+on/off (Wake-on-LAN), volume and mute, the app list with launching, YouTube/Netflix, "Share → Play on TV" for YouTube
+links, several TVs. Not yet: casting, SmartThings. Tested on a Pixel 8a (Android 17) against a 2025 Q7F.
+
+It builds with a toolchain kept under `~/Android` (JDK, Android SDK and NDK, a separate rustup with the Android targets and
+cargo-ndk); `~/Android/env.sh` sets the environment. From fish:
+
+```sh
+cd android
+bash -c 'source ~/Android/env.sh && ./gradlew assembleDebug'     # Rust .so files + Kotlin bindings + APK
+adb install -r app/build/outputs/apk/debug/app-debug.apk          # or copy the APK to the phone and open it
+```
+
+On Android 17, allow "devices on your local network" when asked. Details, tests and notes: [`android/README.md`](android/README.md).
+The MIT license of this repository covers it.
+
 ## Documentation
 
 The user guide is in [`docs/`](docs/README.md):
@@ -73,5 +92,6 @@ The user guide is in [`docs/`](docs/README.md):
 - `core/` — `tvremote_core`: WebSocket remote, REST, DLNA, DIAL, Wake-on-LAN, casting, network check, SmartThings, multi-TV fleet. See `core/API.md`.
 - `gui/` — GTK4 / libadwaita app.
 - `tui/` — ratatui terminal UI and clap CLI.
+- `android/` — Android app: `rust/` (UniFFI bindings crate, outside the Cargo workspace) and the Gradle project.
 
 Not affiliated with or endorsed by Samsung.

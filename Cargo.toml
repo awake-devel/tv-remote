@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["core", "gui", "tui"]
+# The Android FFI crate builds the core with `rustls` (no OpenSSL) and pulls UniFFI: as a
+# member, cargo's feature unification would switch the desktop apps to rustls too, and
+# every workspace build would compile UniFFI. It is built by android/'s Gradle instead.
+exclude = ["android/rust"]
 
 [workspace.package]
 edition = "2021"

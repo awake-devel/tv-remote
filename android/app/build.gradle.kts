@@ -14,7 +14,7 @@ plugins {
 // otherwise (see README).
 
 val rustDir: File = rootProject.file("rust")
-val coreDir: File = rootProject.file("../tv-remote-android-core/core")
+val coreDir: File = rootProject.file("../core")
 val androidRoot = File(System.getProperty("user.home"), "Android")
 val cargoHome: String = providers.environmentVariable("CARGO_HOME").orNull ?: "$androidRoot/rust/cargo"
 val rustupHome: String = providers.environmentVariable("RUSTUP_HOME").orNull ?: "$androidRoot/rust/rustup"

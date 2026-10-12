@@ -8,3 +8,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 rust/target/
+*.apk
+*.aab
+*.jks
+*.keystore
