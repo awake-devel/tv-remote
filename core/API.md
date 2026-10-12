@@ -93,7 +93,8 @@ tv.start_status_polling(Duration::from_secs(5)); // emits Event::Power on change
 | Power | `power_on(timeout)` (WoL every 2 s, plus `KEY_POWER` if in network standby; polls until on), `power_off()` |
 | Volume (DLNA) | `volume()`, `set_volume(u8)`, `mute()`, `set_mute(bool)` |
 | DIAL | `youtube(id_or_url) -> YouTubeOpened` (`Video`, or `AppOnly` when the TV refuses the link and the app was launched over REST instead), `netflix()`; `dial().launch(app, body)` |
-| Cast | `probe_media(path)`, `cast(CastRequest) -> CastSession`, `current_cast()`, `transport()` |
+| Cast | `probe_media(path)`, `cast(CastRequest) -> CastSession`, `current_cast()`, `transport()`, `now_playing() -> Option<CastStatus>` (own session, else a cast started elsewhere) |
+| Playback | `play_pause() -> TransportState`, `pause()` / `resume() -> bool` (false: already so), `stop_cast()`, `seek_to(dur) -> target`, `seek_relative(delta, forward) -> target`, `seek_fraction(0.0..=1.0) -> target`: the own session, else whatever the renderer plays (`Error::NotCasting` if nothing; targets are kept 1 s before the end, `cast::clamp_target`; TV refusals come back reworded by `dlna::friendly`); `media_key(&Key) -> MediaKeyOutcome` (media keys and ← → act on the cast while one plays, else are sent as keys; ± `SEEK_STEP` = 10 s) |
 | Network check | `analyze_demand(&info, on_progress, on_done) -> DemandJob`, `network_verdict(&info, &mode, packets, tv.tv_network()) -> (Demand, Verdict)`, `measure_network(&cancel, &progress)` |
 | SmartThings | `has_smartthings()`, `smartthings() -> SmartThings`, `smartthings_tv() -> StDevice` (linked device; else matched against this TV, or the single TV of a single-TV setup; saved as the link), `linked_smartthings_device()` (never auto-links), `smartthings_status()` |
 | Status | `health() -> TvHealth { lan, cloud, power }`, `lan_reach()`, `cloud_reach()`, `cloud_state()` |
@@ -176,6 +177,8 @@ let session = tv.cast(CastRequest { source: CastSource::File(path), mode, title:
 session.status();          // CastStatus { state, position, duration, seekable, tv_friendly, started, outcome, last_mbps, .. }
 session.throughput();      // Vec<ThroughputSample { t_secs, bytes_per_sec }> for the graph (.mbps())
 session.pause()?; session.resume()?; session.seek(dur)?;   // seek → Error::Unsupported in TV-friendly mode
+session.play_pause()?;     // → new TransportState
+session.seek_relative(SEEK_STEP, true)?; session.seek_fraction(0.5)?;   // → target (clamped; quick repeats add up)
 session.stop()?;
 session.wait(None);        // CLI: block until Ended / NeverStarted / Stopped / Lost
 ```

@@ -1,5 +1,7 @@
-//! Remote page: D-pad, navigation keys, volume / channel, number pad, colour and media
-//! keys, power; plus the window keyboard shortcuts.
+//! Remote page: now-playing bar (while something casts), D-pad, navigation keys,
+//! volume / channel, number pad, colour and media keys, power; plus the window keyboard
+//! shortcuts. While a cast plays, the media keys and ← → act on it (see
+//! [`Ctx::media_key`]).
 
 use std::rc::Rc;
 
@@ -8,6 +10,7 @@ use gtk::{gdk, glib};
 use tvremote_core::Key;
 
 use crate::ctx::Ctx;
+use crate::pages::castbar::CastBar;
 
 fn key_button(ctx: &Rc<Ctx>, key: Key, icon: Option<&str>, label: Option<&str>) -> gtk::Button {
     let b = gtk::Button::new();
@@ -24,7 +27,7 @@ fn key_button(ctx: &Rc<Ctx>, key: Key, icon: Option<&str>, label: Option<&str>) 
     let weak = ctx.weak();
     b.connect_clicked(move |_| {
         if let Some(c) = weak.upgrade() {
-            c.key(key.clone());
+            c.media_key(key.clone());
         }
     });
     b
@@ -48,7 +51,7 @@ fn caption(text: &str) -> gtk::Label {
     l
 }
 
-pub fn build(ctx: &Rc<Ctx>) -> gtk::Widget {
+pub fn build(ctx: &Rc<Ctx>) -> (gtk::Widget, Rc<CastBar>) {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 18);
     root.set_margin_top(24);
     root.set_margin_bottom(24);
@@ -190,14 +193,15 @@ pub fn build(ctx: &Rc<Ctx>) -> gtk::Widget {
     }
     side.append(&colours);
     let media = hbox(6);
-    for (k, icon) in [
-        (Key::Rewind, "media-seek-backward-symbolic"),
-        (Key::Play, "media-playback-start-symbolic"),
-        (Key::Pause, "media-playback-pause-symbolic"),
-        (Key::Stop, "media-playback-stop-symbolic"),
-        (Key::FastForward, "media-seek-forward-symbolic"),
+    for (k, icon, tip) in [
+        (Key::Rewind, "media-seek-backward-symbolic", "Rewind; while casting: back 10 s"),
+        (Key::Play, "media-playback-start-symbolic", "Play; while casting: play / pause"),
+        (Key::Pause, "media-playback-pause-symbolic", "Pause; while casting: play / pause"),
+        (Key::Stop, "media-playback-stop-symbolic", "Stop; while casting: stop the cast"),
+        (Key::FastForward, "media-seek-forward-symbolic", "Fast forward; while casting: forward 10 s"),
     ] {
         let b = key_button(ctx, k, Some(icon), None);
+        b.set_tooltip_text(Some(tip));
         circular(&b, 44);
         media.append(&b);
     }
@@ -215,7 +219,8 @@ pub fn build(ctx: &Rc<Ctx>) -> gtk::Widget {
     root.append(&bottom);
 
     let hint = gtk::Label::new(Some(
-        "Keyboard: arrows, Enter = OK, Backspace = Back, +/− = volume, M = mute, H = Home, 0-9",
+        "Keyboard: arrows, Enter = OK, Backspace = Back, +/− = volume, M = mute, H = Home, 0-9. \
+         While a cast plays, ← → and ⏪ ⏩ seek 10 s and ▶ ⏸ pause / resume it.",
     ));
     hint.add_css_class("dim-label");
     hint.add_css_class("caption");
@@ -223,12 +228,19 @@ pub fn build(ctx: &Rc<Ctx>) -> gtk::Widget {
     hint.set_justify(gtk::Justification::Center);
     root.append(&hint);
 
-    let clamp = adw::Clamp::builder().maximum_size(720).child(&root).build();
+    // Now playing (only while something casts): outside `root` so that, hidden, it
+    // adds no spacing.
+    let bar = CastBar::new(ctx);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.append(&bar.widget);
+    page.append(&root);
+
+    let clamp = adw::Clamp::builder().maximum_size(720).child(&page).build();
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(&clamp)
         .build();
-    scroll.upcast()
+    (scroll.upcast(), bar)
 }
 
 /// Map a key press to a TV key (no modifiers handled here).
@@ -247,6 +259,11 @@ pub fn shortcut_key(keyval: gdk::Key) -> Option<Key> {
         K::h | K::H => Key::Home,
         K::Page_Up => Key::ChannelUp,
         K::Page_Down => Key::ChannelDown,
+        K::AudioPlay => Key::Play,
+        K::AudioPause => Key::Pause,
+        K::AudioStop => Key::Stop,
+        K::AudioRewind => Key::Rewind,
+        K::AudioForward => Key::FastForward,
         _ => {
             let d = keyval.to_unicode().and_then(|c| c.to_digit(10))?;
             Key::digit(u8::try_from(d).ok()?)?
@@ -278,7 +295,7 @@ pub fn install_shortcuts(ctx: &Rc<Ctx>, active: impl Fn() -> bool + 'static) {
         }
         match shortcut_key(keyval) {
             Some(k) => {
-                c.key(k);
+                c.media_key(k);
                 glib::Propagation::Stop
             }
             None => glib::Propagation::Proceed,

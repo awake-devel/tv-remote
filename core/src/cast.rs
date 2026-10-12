@@ -23,10 +23,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::config::cache_dir;
-use crate::dlna::{Dlna, TransportState};
+use crate::dlna::{Dlna, PositionInfo, TransportState};
 use crate::error::{Error, Result};
 use crate::events::{Event, EventBus};
-use crate::server::{local_ip_for, mime_for_path, FileServer, ServeSource, StreamFactory, ThroughputSample};
+use crate::server::{
+    local_ip_for, mime_for_path, url_unquote, FileServer, ServeSource, StreamFactory, ThroughputSample,
+};
 
 pub use crate::media::*;
 
@@ -169,6 +171,176 @@ pub struct CastStatus {
     pub last_mbps: Option<f64>,
 }
 
+impl CastStatus {
+    /// Status of a cast started elsewhere (another process, `tv-cast`, a phone), read
+    /// from the TV's renderer: `None` when nothing is loaded or it is stopped. Pure.
+    pub fn from_renderer(state: &TransportState, pos: &PositionInfo) -> Option<CastStatus> {
+        let seekable = renderer_activity(state, pos)?;
+        Some(CastStatus {
+            title: uri_title(&pos.track_uri),
+            url: pos.track_uri.clone(),
+            seekable,
+            // A TV-friendly cast from another instance, or another live stream.
+            tv_friendly: is_live_stream(pos),
+            state: Some(state.clone()),
+            position: pos.position,
+            duration: pos.duration.filter(|d| !d.is_zero()),
+            started: true,
+            outcome: None,
+            total_bytes: 0,
+            last_mbps: None,
+        })
+    }
+
+    /// Still loading: buffering before the TV knows the length (it reports 0:00:00 for
+    /// the first seconds of every cast). Not a live stream yet, whatever `seekable` says.
+    pub fn is_loading(&self) -> bool {
+        matches!(self.state, None | Some(TransportState::Transitioning)) && self.duration.is_none_or(|d| d.is_zero())
+    }
+
+    /// Why this cast can't seek: a live stream, or still loading (the TV knows no
+    /// length yet). Pure.
+    pub fn no_seek_error(&self) -> Error {
+        if !self.tv_friendly && self.is_loading() {
+            still_loading()
+        } else {
+            Error::Playback("this cast is a live stream: seeking is not possible".into())
+        }
+    }
+}
+
+/// The TV refuses `Pause` on a live (TV-friendly) stream outright: say so at once
+/// instead of retrying.
+pub(crate) fn live_pause() -> Error {
+    Error::Playback("this cast is a live stream: pausing is not possible".into())
+}
+
+pub(crate) fn still_loading() -> Error {
+    Error::Playback("the cast is still loading: try again in a moment".into())
+}
+
+/// Has playback begun? PLAYING or PAUSED_PLAYBACK (a cast can be paused during its
+/// start-up buffering and never be seen PLAYING), or any other state but buffering with
+/// a position past 0 (the TV may still report a stale one while buffering). Pure.
+pub fn has_started(state: &TransportState, position: Option<Duration>) -> bool {
+    match state {
+        TransportState::Playing | TransportState::Paused => true,
+        TransportState::Transitioning => false,
+        _ => position.is_some_and(|p| !p.is_zero()),
+    }
+}
+
+/// Step of the rewind / fast-forward keys (and ← → while casting).
+pub const SEEK_STEP: Duration = Duration::from_secs(10);
+
+/// How far before the end a seek may land: the TV refuses a target equal to the length
+/// (UPnP 711 *Illegal seek target*) but accepts one 1 s before it.
+pub const SEEK_END_MARGIN: Duration = Duration::from_secs(1);
+
+/// Keep a seek target inside the media: at most `duration` − [`SEEK_END_MARGIN`] when
+/// the length is known (a zero length counts as unknown). Pure.
+pub fn clamp_target(to: Duration, duration: Option<Duration>) -> Duration {
+    match duration.filter(|d| !d.is_zero()) {
+        Some(d) => to.min(d.saturating_sub(SEEK_END_MARGIN)),
+        None => to,
+    }
+}
+
+/// Target of a relative seek: `position` ± `delta`, ≥ 0 and kept inside the media when
+/// the length is known ([`clamp_target`]). Pure.
+pub fn relative_target(position: Duration, delta: Duration, forward: bool, duration: Option<Duration>) -> Duration {
+    let t = if forward {
+        position.saturating_add(delta)
+    } else {
+        position.saturating_sub(delta)
+    };
+    clamp_target(t, duration)
+}
+
+/// The point at `fraction` (clamped to 0.0-1.0) of `duration`, kept inside the media
+/// ([`clamp_target`]). Pure.
+pub fn fraction_target(duration: Duration, fraction: f64) -> Duration {
+    let f = if fraction.is_finite() { fraction.clamp(0.0, 1.0) } else { 0.0 };
+    clamp_target(duration.mul_f64(f), Some(duration))
+}
+
+/// Is something casting, judging from the renderer alone? `Some(seekable)` while it
+/// plays, pauses or buffers. Seekable when the TV reports a length and it is not a live
+/// stream ([`is_live_stream`]): with the duration hint of a TV-friendly cast, the TV
+/// reports a length and even lists `Seek`, then refuses every seek. Pure.
+pub fn renderer_activity(state: &TransportState, pos: &PositionInfo) -> Option<bool> {
+    match state {
+        TransportState::Playing | TransportState::Paused | TransportState::Transitioning => {
+            Some(pos.duration.is_some_and(|d| !d.is_zero()) && !is_live_stream(pos))
+        }
+        _ => None,
+    }
+}
+
+/// A live stream the TV can't seek in: a TV-friendly cast from this app (any process;
+/// its URL ends in `<name>.tv.mkv` / `.tv.ts`, see [`start_cast`]), or a track whose
+/// DIDL says the server allows neither time nor byte seeks (`DLNA.ORG_OP=00`). Pure.
+pub fn is_live_stream(pos: &PositionInfo) -> bool {
+    let name = uri_title(&pos.track_uri).to_ascii_lowercase();
+    let friendly = [StreamContainer::Matroska, StreamContainer::MpegTs]
+        .iter()
+        .any(|c| name.ends_with(&format!(".tv.{}", c.extension())));
+    friendly || pos.track_metadata.contains("DLNA.ORG_OP=00")
+}
+
+/// Display title for a media URI: its decoded file name. Pure.
+pub fn uri_title(uri: &str) -> String {
+    let u = uri.trim();
+    let name = u
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(u)
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(url_unquote)
+        .unwrap_or_default();
+    if name.is_empty() {
+        "Media cast from another device".into()
+    } else {
+        name
+    }
+}
+
+/// How long the target of the last seek stands in for the reported position. Right
+/// after a seek the TV still reports the old position for a moment, so quick repeated
+/// ±10 s presses must add up instead of each starting from the stale position.
+const SEEK_MEMO: Duration = Duration::from_secs(3);
+
+/// The last seek target and when it was sent.
+#[derive(Default)]
+pub(crate) struct SeekMemo(Mutex<Option<(Duration, Instant)>>);
+
+impl SeekMemo {
+    pub(crate) fn record(&self, to: Duration) {
+        if let Ok(mut m) = self.0.lock() {
+            *m = Some((to, Instant::now()));
+        }
+    }
+
+    /// Where a relative seek starts: the last target while fresh, else `reported`.
+    pub(crate) fn base(&self, reported: Option<Duration>) -> Option<Duration> {
+        let recent = self
+            .0
+            .lock()
+            .ok()
+            .and_then(|m| *m)
+            .filter(|(_, at)| at.elapsed() < SEEK_MEMO)
+            .map(|(to, _)| to);
+        recent.or(reported)
+    }
+}
+
+/// Error for a relative seek when the TV gives no position.
+pub(crate) fn position_unknown() -> Error {
+    Error::Playback("the TV does not report the playback position".into())
+}
+
 struct SessionInner {
     dlna: Dlna,
     /// A still image: its position never advances, so the stall guards are off.
@@ -176,6 +348,7 @@ struct SessionInner {
     server: Option<FileServer>,
     bus: EventBus,
     status: Mutex<CastStatus>,
+    seek_memo: SeekMemo,
     stop_flag: AtomicBool,
     done: (Mutex<bool>, Condvar),
 }
@@ -247,8 +420,11 @@ impl CastSession {
         r
     }
 
-    /// Pause.
+    /// Pause (a live TV-friendly stream can't: [`Error::Playback`] without asking the TV).
     pub fn pause(&self) -> Result<()> {
+        if self.status().tv_friendly {
+            return Err(live_pause());
+        }
         self.inner.dlna.pause()
     }
 
@@ -257,12 +433,58 @@ impl CastSession {
         self.inner.dlna.play()
     }
 
-    /// Seek (direct casts only; TV-friendly streams return [`Error::Unsupported`]).
+    /// Pause when playing (or buffering), else resume. Returns the new state (`Playing`
+    /// / `Paused`).
+    pub fn play_pause(&self) -> Result<TransportState> {
+        let playing = matches!(
+            self.status().state,
+            Some(TransportState::Playing | TransportState::Transitioning)
+        );
+        let r = if playing {
+            self.pause().map(|_| TransportState::Paused)
+        } else {
+            self.resume().map(|_| TransportState::Playing)
+        };
+        r.map_err(crate::dlna::friendly)
+    }
+
+    /// Seek (direct casts only; TV-friendly streams return [`Error::Playback`]). The
+    /// target is kept inside the media ([`clamp_target`]).
     pub fn seek(&self, to: Duration) -> Result<()> {
-        if !self.status().seekable {
-            return Err(Error::Unsupported("seeking is not possible in TV-friendly mode".into()));
+        let st = self.status();
+        if !st.seekable {
+            return Err(st.no_seek_error());
         }
-        self.inner.dlna.seek(to)
+        let to = clamp_target(to, st.duration);
+        self.inner.dlna.seek(to).map_err(crate::dlna::friendly)?;
+        self.inner.seek_memo.record(to);
+        Ok(())
+    }
+
+    /// Seek `delta` forward or back from the current position (see [`relative_target`]).
+    /// Returns the target. Quick repeated calls add up (the last target counts as the
+    /// position for a few seconds).
+    pub fn seek_relative(&self, delta: Duration, forward: bool) -> Result<Duration> {
+        let st = self.status();
+        if !st.seekable {
+            return Err(st.no_seek_error());
+        }
+        let pos = self.inner.seek_memo.base(st.position).ok_or_else(position_unknown)?;
+        let to = relative_target(pos, delta, forward, st.duration);
+        self.seek(to)?;
+        Ok(to)
+    }
+
+    /// Seek to `fraction` (0.0-1.0) of the length. Returns the target.
+    pub fn seek_fraction(&self, fraction: f64) -> Result<Duration> {
+        let d = self
+            .status()
+            .duration
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| Error::Playback("the length of this media is not known yet".into()))?;
+        let to = fraction_target(d, fraction);
+        self.seek(to)?;
+        Ok(to)
     }
 
     /// Block until the session finishes (or `timeout` elapses → `None`).
@@ -414,6 +636,7 @@ pub fn start_cast(dlna: &Dlna, req: CastRequest, bus: EventBus) -> Result<CastSe
             total_bytes: 0,
             last_mbps: None,
         }),
+        seek_memo: SeekMemo::default(),
         stop_flag: AtomicBool::new(false),
         done: (Mutex::new(false), Condvar::new()),
     });
@@ -497,6 +720,7 @@ fn monitor(inner: Arc<SessionInner>) {
         if last_state.as_ref() != Some(&state) {
             inner.bus.emit(Event::Cast(CastEvent::State(state.clone())));
         }
+        started = started || has_started(&state, pi.as_ref().and_then(|p| p.position));
         if let Ok(mut st) = inner.status.lock() {
             st.state = Some(state.clone());
             if let Some(p) = &pi {
@@ -505,7 +729,7 @@ fn monitor(inner: Arc<SessionInner>) {
                     st.duration = p.duration;
                 }
             }
-            st.started = started || state == TransportState::Playing;
+            st.started = started;
         }
         if let Some(p) = &pi {
             inner.bus.emit(Event::Cast(CastEvent::Position {
@@ -516,7 +740,6 @@ fn monitor(inner: Arc<SessionInner>) {
 
         match state {
             TransportState::Playing => {
-                started = true;
                 // Live guard: position frozen while PLAYING.
                 let pos = pi.as_ref().and_then(|p| p.position);
                 if pos.is_some() && pos == last_pos {
@@ -594,6 +817,172 @@ mod tests {
     #[test]
     fn didl_duration_format() {
         assert_eq!(didl_duration(Duration::from_millis(3_723_456)), "1:02:03.456");
+    }
+
+    #[test]
+    fn relative_seek_is_clamped() {
+        let s = Duration::from_secs;
+        assert_eq!(relative_target(s(100), SEEK_STEP, true, Some(s(600))), s(110));
+        assert_eq!(relative_target(s(100), SEEK_STEP, false, Some(s(600))), s(90));
+        assert_eq!(relative_target(s(5), SEEK_STEP, false, Some(s(600))), s(0), "never below 0");
+        // The TV refuses a target equal to the length (711) but takes one 1 s before.
+        assert_eq!(relative_target(s(595), SEEK_STEP, true, Some(s(600))), s(599), "never at the end");
+        assert_eq!(clamp_target(s(600), Some(s(600))), s(599));
+        assert_eq!(clamp_target(s(900), Some(s(600))), s(599));
+        assert_eq!(clamp_target(s(299), Some(s(300))), s(299));
+        assert_eq!(clamp_target(s(900), None), s(900));
+        assert_eq!(clamp_target(s(5), Some(Duration::from_millis(500))), s(0), "tiny media");
+        // Unknown (or zero, as some TVs report for streams) length: only the floor applies.
+        assert_eq!(relative_target(s(595), SEEK_STEP, true, None), s(605));
+        assert_eq!(relative_target(s(595), SEEK_STEP, true, Some(s(0))), s(605));
+        assert_eq!(relative_target(s(3), s(90), false, None), s(0));
+    }
+
+    #[test]
+    fn fraction_targets() {
+        let d = Duration::from_secs(600);
+        assert_eq!(fraction_target(d, 0.5), Duration::from_secs(300));
+        assert_eq!(fraction_target(d, 0.0), Duration::ZERO);
+        assert_eq!(fraction_target(d, 1.0), Duration::from_secs(599), "last bar column");
+        assert_eq!(fraction_target(d, 1.7), Duration::from_secs(599));
+        assert_eq!(fraction_target(d, -1.0), Duration::ZERO);
+        assert_eq!(fraction_target(d, f64::NAN), Duration::ZERO);
+    }
+
+    #[test]
+    fn seek_memo_stands_in_for_a_stale_position() {
+        let m = SeekMemo::default();
+        assert_eq!(m.base(Some(Duration::from_secs(7))), Some(Duration::from_secs(7)));
+        assert_eq!(m.base(None), None);
+        m.record(Duration::from_secs(40));
+        assert_eq!(m.base(Some(Duration::from_secs(30))), Some(Duration::from_secs(40)));
+        assert_eq!(m.base(None), Some(Duration::from_secs(40)));
+    }
+
+    #[test]
+    fn renderer_status_of_a_cast_started_elsewhere() {
+        let pos = PositionInfo {
+            position: Some(Duration::from_secs(12)),
+            duration: Some(Duration::from_secs(3600)),
+            track_uri: "http://192.0.2.10:8000/Le%20film.mkv?x=1".into(),
+            track_metadata: String::new(),
+        };
+        let st = CastStatus::from_renderer(&TransportState::Paused, &pos).unwrap();
+        assert_eq!(st.title, "Le film.mkv");
+        assert!(st.seekable);
+        assert_eq!(st.position, Some(Duration::from_secs(12)));
+        assert!(CastStatus::from_renderer(&TransportState::Stopped, &pos).is_none());
+        assert!(CastStatus::from_renderer(&TransportState::NoMedia, &PositionInfo::default()).is_none());
+        // A live stream reports no length (or 0:00:00): not seekable.
+        let live = PositionInfo { duration: Some(Duration::ZERO), ..pos.clone() };
+        assert_eq!(renderer_activity(&TransportState::Playing, &live), Some(false));
+        assert_eq!(CastStatus::from_renderer(&TransportState::Playing, &live).unwrap().duration, None);
+        // At the start of every cast the TV buffers with a 0:00:00 length: loading, not live.
+        let start = CastStatus::from_renderer(&TransportState::Transitioning, &live).unwrap();
+        assert!(start.is_loading());
+        assert!(!st.is_loading());
+        assert_eq!(uri_title(""), "Media cast from another device");
+    }
+
+    /// A session that never touches the network (TEST-NET address, no server, no monitor).
+    fn offline_session(tv_friendly: bool, state: TransportState) -> CastSession {
+        let status = CastStatus {
+            title: "x".into(),
+            url: "http://192.0.2.10:1/x.tv.mkv".into(),
+            seekable: !tv_friendly,
+            tv_friendly,
+            state: Some(state),
+            position: Some(Duration::from_secs(5)),
+            duration: Some(Duration::from_secs(300)),
+            started: true,
+            outcome: None,
+            total_bytes: 0,
+            last_mbps: None,
+        };
+        CastSession {
+            inner: Arc::new(SessionInner {
+                dlna: Dlna::new("192.0.2.1"),
+                still: false,
+                server: None,
+                bus: EventBus::new(),
+                status: Mutex::new(status),
+                seek_memo: SeekMemo::default(),
+                stop_flag: AtomicBool::new(true),
+                done: (Mutex::new(false), Condvar::new()),
+            }),
+        }
+    }
+
+    #[test]
+    fn live_streams_refuse_pause_and_seek_at_once() {
+        let s = offline_session(true, TransportState::Playing);
+        let t0 = Instant::now();
+        let msg = |r: Result<()>| r.unwrap_err().to_string();
+        assert_eq!(msg(s.pause()), "this cast is a live stream: pausing is not possible");
+        assert_eq!(
+            s.play_pause().unwrap_err().to_string(),
+            "this cast is a live stream: pausing is not possible"
+        );
+        assert_eq!(msg(s.seek(Duration::from_secs(9))), "this cast is a live stream: seeking is not possible");
+        assert!(t0.elapsed() < Duration::from_millis(100), "no retries, no network");
+    }
+
+    #[test]
+    fn playback_started_even_if_never_seen_playing() {
+        let s = Duration::from_secs;
+        assert!(has_started(&TransportState::Playing, None));
+        // Paused during the start-up buffering: the TV goes straight to PAUSED at 0:00.
+        assert!(has_started(&TransportState::Paused, Some(Duration::ZERO)));
+        assert!(has_started(&TransportState::Other("X".into()), Some(s(3))));
+        assert!(!has_started(&TransportState::Transitioning, Some(s(3))), "maybe a stale position");
+        assert!(!has_started(&TransportState::Stopped, Some(Duration::ZERO)));
+        assert!(!has_started(&TransportState::NoMedia, None));
+    }
+
+    #[test]
+    fn no_seek_says_loading_or_live() {
+        let mut st = offline_session(false, TransportState::Transitioning).status();
+        st.seekable = false;
+        st.duration = None;
+        assert_eq!(st.no_seek_error().to_string(), "the cast is still loading: try again in a moment");
+        st.state = Some(TransportState::Playing);
+        assert_eq!(st.no_seek_error().to_string(), "this cast is a live stream: seeking is not possible");
+        // A TV-friendly stream is live even while it loads.
+        let mut f = offline_session(true, TransportState::Transitioning).status();
+        f.duration = None;
+        assert!(f.no_seek_error().to_string().contains("live stream"));
+        // External: a direct cast at start-up (0:00:00 length) vs a stream recognised by its URL.
+        let pos = PositionInfo { duration: Some(Duration::ZERO), track_uri: "http://a/f.mp4".into(), ..Default::default() };
+        let loading = CastStatus::from_renderer(&TransportState::Transitioning, &pos).unwrap();
+        assert!(loading.no_seek_error().to_string().contains("still loading"));
+        let live = PositionInfo { track_uri: "http://a/f.tv.mkv".into(), ..pos };
+        let live = CastStatus::from_renderer(&TransportState::Transitioning, &live).unwrap();
+        assert!(live.tv_friendly);
+        assert!(live.no_seek_error().to_string().contains("live stream"));
+    }
+
+    #[test]
+    fn tv_friendly_streams_are_never_seekable() {
+        // A TV-friendly cast from any process: the duration hint makes the TV report a
+        // length (and list Seek), but every seek is refused.
+        let friendly = PositionInfo {
+            position: Some(Duration::from_secs(3)),
+            duration: Some(Duration::from_secs(300)),
+            track_uri: "http://192.0.2.10:41234/Le%20film.tv.mkv".into(),
+            track_metadata: String::new(),
+        };
+        assert!(is_live_stream(&friendly));
+        assert_eq!(renderer_activity(&TransportState::Playing, &friendly), Some(false));
+        let ts = PositionInfo { track_uri: "http://192.0.2.10:1/x.TV.ts".into(), ..friendly.clone() };
+        assert!(is_live_stream(&ts));
+        let direct = PositionInfo { track_uri: "http://192.0.2.10:1/tv.mkv".into(), ..friendly.clone() };
+        assert!(!is_live_stream(&direct), "a file named tv.mkv is not a stream");
+        assert_eq!(renderer_activity(&TransportState::Paused, &direct), Some(true));
+        let op00 = PositionInfo {
+            track_metadata: "<res protocolInfo=\"http-get:*:video/mp4:DLNA.ORG_OP=00;DLNA.ORG_CI=0\">".into(),
+            ..direct
+        };
+        assert!(is_live_stream(&op00));
     }
 
     #[test]

@@ -25,6 +25,7 @@ The command stays attached and shows progress. Press Ctrl-C to stop playback.
 | Audio | all tracks; the TV plays the default one | one track you choose; DTS and TrueHD are converted to AC3 (640 kbit/s) |
 | Subtitles | whatever the TV finds in the file | one text subtitle track (SRT, ASS, WebVTT…) kept as a soft SRT track; image subtitles (PGS, VobSub) can't be kept |
 | Seeking | yes | no (the stream is live) |
+| Pausing | yes | no: the TV refuses to pause a live stream |
 | PC load | almost none | light when copying video; GPU work when re-encoding |
 
 Use **direct** when the file plays as-is. Use **TV-friendly** when:
@@ -158,7 +159,11 @@ Fixes:
 
 If playback freezes for 4 seconds, or the TV starts buffering in the middle, TV Remote warns you and suggests a fix. The throughput graph on the **Cast** page shows how fast the TV is pulling data. A photo stays at 0:00 and doesn't trigger this warning.
 
-After a seek, the TV buffers again and accepts only Stop for a few seconds (5 to 9 s on a slow link). A pause pressed in that window waits for the TV, up to 10 s, instead of failing.
+To seek, click or drag the seek bar on the **Remote** page (it appears while something casts) or on the **Cast** page, or use the remote's rewind / fast-forward keys and the ← → arrows, which jump 10 seconds while a cast plays. In the terminal UI, click the progress bar, use ← → or `<` `>`, or press `0` to `9` to jump to 0 % to 90 %. On the command line, `seek` takes a time, `+10` / `-10`, or a percentage. This also works for a cast started by another device or program, as long as the TV reports its length.
+
+Right after a seek, the TV briefly refuses a pause or another seek. On a wired LAN this clears within about 0.2 s, so TV Remote retries for up to about 1.5 s and then tells you the TV can't do it right now. The TV never seeks to the very end: a jump to the end lands 1 second before it. Seeks land on a keyframe, often 1 to 3 seconds before the point you picked.
+
+A TV-friendly cast is a live stream even when the TV shows its length: TV Remote recognises it (from this app or another instance), never offers to seek in it, and greys out pause. In the first seconds of any cast the TV doesn't know the length yet; a seek then says the cast is still loading.
 
 ## When to use a USB drive instead
 

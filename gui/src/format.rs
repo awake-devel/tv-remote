@@ -291,6 +291,17 @@ pub fn quality_label(mbps: f64) -> String {
     }
 }
 
+/// Fraction (0.0-1.0) of a slider's range under pointer `x`: the knob (`knob` wide)
+/// travels inside a trough starting at `start`, `width` wide, so its centre runs from
+/// `start + knob / 2` (0 %) to `start + width - knob / 2` (100 %). Pure.
+pub fn x_to_fraction(x: f64, start: f64, width: f64, knob: f64) -> f64 {
+    let travel = width - knob;
+    if !travel.is_finite() || travel <= 0.0 {
+        return 0.0;
+    }
+    ((x - start - knob / 2.0) / travel).clamp(0.0, 1.0)
+}
+
 /// Throughput samples → points for the sparkline: x in 0..=1, y in 0..=1 (1 = top),
 /// scaled to `max(samples, floor)`. Returns the scale used (Mbit/s).
 pub fn sparkline_points(samples: &[f64], floor: f64) -> (Vec<(f64, f64)>, f64) {
@@ -360,6 +371,18 @@ pub fn looks_like_url(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slider_x_to_fraction() {
+        // Trough 10..210 px, 20 px knob: its centre travels 20..200.
+        assert_eq!(x_to_fraction(20.0, 10.0, 200.0, 20.0), 0.0);
+        assert_eq!(x_to_fraction(200.0, 10.0, 200.0, 20.0), 1.0);
+        assert_eq!(x_to_fraction(110.0, 10.0, 200.0, 20.0), 0.5);
+        assert_eq!(x_to_fraction(-50.0, 10.0, 200.0, 20.0), 0.0, "left of the trough");
+        assert_eq!(x_to_fraction(500.0, 10.0, 200.0, 20.0), 1.0, "right of the trough");
+        assert_eq!(x_to_fraction(50.0, 0.0, 100.0, 0.0), 0.5, "no knob");
+        assert_eq!(x_to_fraction(5.0, 0.0, 10.0, 20.0), 0.0, "knob wider than the trough");
+    }
 
     #[test]
     fn status_dots() {

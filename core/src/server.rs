@@ -74,6 +74,31 @@ pub fn url_quote(s: &str) -> String {
     out
 }
 
+/// Decode `%XX` escapes (invalid escapes are kept as they are; invalid UTF-8 is
+/// replaced). Pure.
+pub fn url_unquote(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = b
+            .get(i + 1..i + 3)
+            .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|h| std::str::from_utf8(h).ok());
+        match (b[i], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(v)) => {
+                out.push(v);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// The local IP address used to reach `host` (UDP connect trick; sends no packet).
 pub fn local_ip_for(host: &str) -> Result<IpAddr> {
     let s = UdpSocket::bind("0.0.0.0:0")?;
@@ -623,6 +648,8 @@ mod tests {
     #[test]
     fn misc_helpers() {
         assert_eq!(url_quote("a b/é.mkv"), "a%20b/%C3%A9.mkv");
+        assert_eq!(url_unquote("a%20b/%C3%A9.mkv"), "a b/é.mkv");
+        assert_eq!(url_unquote("100%+1%2"), "100%+1%2", "invalid escapes are kept");
         assert_eq!(mime_for_path(Path::new("x.MKV")), "video/x-mkv");
         assert_eq!(mime_for_path(Path::new("x.flac")), "audio/x-flac");
         assert_eq!(mime_for_path(Path::new("x")), "video/mp4");

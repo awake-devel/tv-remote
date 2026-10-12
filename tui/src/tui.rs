@@ -3,7 +3,8 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event as TermEvent, KeyEventKind};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event as TermEvent, KeyEventKind};
+use ratatui::crossterm::execute;
 
 use tvremote_core::{Fleet, Tv};
 
@@ -14,8 +15,15 @@ struct RestoreGuard;
 
 impl Drop for RestoreGuard {
     fn drop(&mut self) {
-        ratatui::restore();
+        restore();
     }
+}
+
+/// Leave mouse capture (enabled for the clickable progress bar), then raw mode and the
+/// alternate screen.
+fn restore() {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
 }
 
 /// Restore the terminal before the default panic message is printed, so a panic
@@ -23,7 +31,7 @@ impl Drop for RestoreGuard {
 fn install_panic_hook() {
     let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        ratatui::restore();
+        restore();
         prev(info);
     }));
 }
@@ -38,6 +46,9 @@ pub fn run(fleet: Fleet, tv: Tv) -> Result<(), String> {
     let mut terminal =
         ratatui::try_init().map_err(|e| format!("cannot set up the terminal: {e}"))?;
     let _guard = RestoreGuard;
+    // Mouse: a click on the now-playing progress bar seeks (Shift+drag still selects
+    // text in most terminals).
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     app.start();
 
     while !app.quit {
@@ -50,14 +61,15 @@ pub fn run(fleet: Fleet, tv: Tv) -> Result<(), String> {
         if event::poll(Duration::from_millis(150)).map_err(|e| e.to_string())? {
             match event::read().map_err(|e| e.to_string())? {
                 TermEvent::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                TermEvent::Mouse(m) => app.on_mouse(m),
                 _ => {}
             }
             // Drain queued input quickly (key repeat) before the next redraw.
             while !app.quit && event::poll(Duration::ZERO).unwrap_or(false) {
-                if let Ok(TermEvent::Key(k)) = event::read() {
-                    if k.kind == KeyEventKind::Press {
-                        app.on_key(k);
-                    }
+                match event::read() {
+                    Ok(TermEvent::Key(k)) if k.kind == KeyEventKind::Press => app.on_key(k),
+                    Ok(TermEvent::Mouse(m)) => app.on_mouse(m),
+                    _ => {}
                 }
             }
         }

@@ -59,6 +59,13 @@ pub enum Error {
     /// with `invalid_grant`, or none is left): the user must log in again.
     #[error("SmartThings login expired: log in again (Device page → Connect SmartThings, or `tv-remote-tui smartthings login`)")]
     SmartThingsLoginExpired,
+    /// A playback command the TV can't carry out for this cast or right now (a live
+    /// stream, still loading, refused by the TV). The text reads on its own.
+    #[error("{0}")]
+    Playback(String),
+    /// A playback command (pause, seek, ...) found nothing casting on the TV.
+    #[error("nothing is casting on the TV")]
+    NotCasting,
     /// The operation was cancelled by the caller.
     #[error("cancelled")]
     Cancelled,

@@ -1,4 +1,4 @@
-//! Now-playing card: title, state, position / duration, seek bar (direct casts only),
+//! Now-playing card: title, state, a VLC-like seek bar (greyed out for live streams),
 //! play/pause/stop and a throughput sparkline. Driven by `Event::Cast`.
 
 use std::cell::{Cell, RefCell};
@@ -12,7 +12,8 @@ use tvremote_core::dlna::TransportState;
 use tvremote_core::{CastEvent, CastSession, CastStatus};
 
 use crate::ctx::Ctx;
-use crate::format::{fmt_duration, fmt_mbps, sparkline_points};
+use crate::format::{fmt_mbps, sparkline_points};
+use crate::seekbar::SeekBar;
 
 /// Samples kept for the sparkline (one per second).
 const MAX_SAMPLES: usize = 90;
@@ -21,8 +22,7 @@ pub struct NowPlaying {
     pub group: adw::PreferencesGroup,
     ctx: Weak<Ctx>,
     title_row: adw::ActionRow,
-    pos_label: gtk::Label,
-    seek: gtk::Scale,
+    bar: Rc<SeekBar>,
     seek_note: gtk::Label,
     play_btn: gtk::Button,
     stop_btn: gtk::Button,
@@ -32,11 +32,16 @@ pub struct NowPlaying {
     session: RefCell<Option<CastSession>>,
     seekable: Cell<bool>,
     playing: Cell<bool>,
-    seek_timer: RefCell<Option<glib::SourceId>>,
-    seek_pending: Cell<bool>,
+    /// A TV-friendly (live) stream: the TV refuses Pause and Seek.
+    live: Cell<bool>,
 }
 
-fn state_text(s: &TransportState) -> &'static str {
+/// Tooltip of the greyed-out seek bar.
+pub const NO_SEEK_LIVE: &str = "This cast is a live stream (TV-friendly mode): seeking is not possible";
+/// Tooltip of the greyed-out pause button.
+pub const NO_PAUSE_LIVE: &str = "This cast is a live stream (TV-friendly mode): pausing is not possible";
+
+pub fn state_text(s: &TransportState) -> &'static str {
     match s {
         TransportState::Playing => "Playing",
         TransportState::Paused => "Paused",
@@ -60,16 +65,8 @@ impl NowPlaying {
         body.set_margin_start(12);
         body.set_margin_end(12);
 
-        let seek = gtk::Scale::with_range(gtk::Orientation::Horizontal, 0.0, 1.0, 1.0);
-        seek.set_draw_value(false);
-        seek.set_hexpand(true);
-        let pos_label = gtk::Label::new(Some("0:00 / 0:00"));
-        pos_label.add_css_class("numeric");
-        pos_label.add_css_class("dim-label");
-        let seek_line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-        seek_line.append(&seek);
-        seek_line.append(&pos_label);
-        body.append(&seek_line);
+        let bar = SeekBar::new();
+        body.append(&bar.widget);
         let seek_note = gtk::Label::new(Some("TV-friendly streams are live: seeking is not possible."));
         seek_note.add_css_class("caption");
         seek_note.add_css_class("dim-label");
@@ -158,8 +155,7 @@ impl NowPlaying {
             group,
             ctx: ctx.weak(),
             title_row,
-            pos_label,
-            seek,
+            bar,
             seek_note,
             play_btn,
             stop_btn,
@@ -169,8 +165,7 @@ impl NowPlaying {
             session: RefCell::new(None),
             seekable: Cell::new(false),
             playing: Cell::new(false),
-            seek_timer: RefCell::new(None),
-            seek_pending: Cell::new(false),
+            live: Cell::new(false),
         });
         this.set_active(false);
 
@@ -206,38 +201,24 @@ impl NowPlaying {
             );
         });
         let w = Rc::downgrade(&this);
-        this.seek.connect_change_value(move |_, _, value| {
-            let Some(np) = w.upgrade() else { return glib::Propagation::Stop };
-            if !np.seekable.get() {
-                return glib::Propagation::Stop;
+        this.bar.connect_seek(move |to| {
+            if let Some(np) = w.upgrade() {
+                np.do_seek(to);
             }
-            np.seek_pending.set(true);
-            if let Some(id) = np.seek_timer.borrow_mut().take() {
-                id.remove();
-            }
-            let w2 = Rc::downgrade(&np);
-            let id = glib::timeout_add_local_once(Duration::from_millis(400), move || {
-                let Some(np) = w2.upgrade() else { return };
-                np.seek_timer.borrow_mut().take();
-                np.do_seek(value);
-            });
-            *np.seek_timer.borrow_mut() = Some(id);
-            glib::Propagation::Proceed
         });
         this
     }
 
-    fn do_seek(self: &Rc<Self>, secs: f64) {
+    fn do_seek(self: &Rc<Self>, to: Duration) {
         let Some(s) = self.session.borrow().clone() else { return };
         let Some(c) = self.ctx.upgrade() else { return };
         let w = Rc::downgrade(self);
         let wc = c.weak();
-        let to = Duration::from_secs_f64(secs.max(0.0));
         c.spawn(
             move |_| s.seek(to),
             move |res| {
                 if let Some(np) = w.upgrade() {
-                    np.seek_pending.set(false);
+                    np.bar.seek_done();
                 }
                 if let (Some(c), Err(e)) = (wc.upgrade(), res) {
                     c.toast(&format!("Seek: {e}"));
@@ -247,9 +228,10 @@ impl NowPlaying {
     }
 
     fn set_active(&self, active: bool) {
-        self.play_btn.set_sensitive(active);
+        self.play_btn.set_sensitive(active && !self.live.get());
+        self.play_btn.set_tooltip_text(Some(if self.live.get() { NO_PAUSE_LIVE } else { "Pause / resume" }));
         self.stop_btn.set_sensitive(active);
-        self.seek.set_sensitive(active && self.seekable.get());
+        self.bar.set_seekable(active && self.seekable.get(), NO_SEEK_LIVE);
     }
 
     /// A session started (from this page or found at startup).
@@ -279,7 +261,7 @@ impl NowPlaying {
     fn apply_status(&self, st: &CastStatus) {
         self.title_row.set_title(&glib::markup_escape_text(&st.title));
         self.seekable.set(st.seekable);
-        self.seek.set_visible(st.seekable);
+        self.live.set(st.tv_friendly);
         self.seek_note.set_visible(st.tv_friendly);
         if let Some(s) = &st.state {
             self.set_state(s);
@@ -304,19 +286,7 @@ impl NowPlaying {
     }
 
     fn set_position(&self, pos: Option<Duration>, dur: Option<Duration>) {
-        let p = pos.unwrap_or_default();
-        let text = match dur {
-            Some(d) if !d.is_zero() => format!("{} / {}", fmt_duration(p), fmt_duration(d)),
-            _ => fmt_duration(p),
-        };
-        self.pos_label.set_text(&text);
-        if self.seek_pending.get() || self.seek_timer.borrow().is_some() {
-            return;
-        }
-        if let Some(d) = dur.filter(|d| !d.is_zero()) {
-            self.seek.set_range(0.0, d.as_secs_f64());
-        }
-        self.seek.set_value(p.as_secs_f64());
+        self.bar.set_position(pos, dur);
     }
 
     fn finish(&self, what: &str) {
@@ -325,7 +295,7 @@ impl NowPlaying {
         self.play_btn.set_icon_name("media-playback-start-symbolic");
         self.play_btn.set_sensitive(false);
         self.stop_btn.set_sensitive(false);
-        self.seek.set_sensitive(false);
+        self.bar.set_seekable(false, "");
         self.session.borrow_mut().take();
     }
 
@@ -335,6 +305,7 @@ impl NowPlaying {
             CastEvent::Loading { title } => {
                 self.title_row.set_title(&glib::markup_escape_text(title));
                 self.title_row.set_subtitle("Loading on the TV…");
+                self.bar.reset();
                 self.samples.borrow_mut().clear();
                 self.spark.queue_draw();
             }

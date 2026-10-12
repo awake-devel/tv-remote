@@ -2,6 +2,7 @@
 
 pub mod apps;
 pub mod cast;
+pub mod castbar;
 pub mod device;
 pub mod picture;
 pub mod remote;

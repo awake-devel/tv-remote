@@ -4,7 +4,7 @@
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Clear, Gauge, LineGauge, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
 use tvremote_core::cast::VideoMode;
@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(f.area());
     draw_status(f, app, status);
     match app.screen {
-        Screen::Main => draw_legend(f, body),
+        Screen::Main => draw_legend(f, app, body),
         Screen::Apps => draw_apps(f, app, body),
         Screen::Browser => draw_browser(f, app, body),
         Screen::Profile => draw_profile(f, app, body),
@@ -75,7 +75,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
 // ---------------------------------------------------------------------- status strip
 
-fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
     let name = app.tv.display_name();
     let others = app.tv_list.len().saturating_sub(1);
     let mut title = vec![
@@ -121,9 +121,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         l1,
     );
 
-    match app.session.as_ref().map(|s| s.status()) {
+    app.seek_bar = None;
+    let elsewhere = !app.is_casting();
+    match app.playing() {
         Some(st) => {
             let state = match &st.state {
+                _ if st.is_loading() => "… loading",
                 Some(TransportState::Playing) => "▶ playing",
                 Some(TransportState::Paused) => "⏸ paused",
                 Some(TransportState::Transitioning) => "… buffering",
@@ -131,39 +134,61 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
                 Some(TransportState::NoMedia) => "no media",
                 Some(TransportState::Other(_)) | None => "loading",
             };
-            let pos = st.position.map(fmt_duration).unwrap_or_else(|| "–".into());
-            let dur = st.duration.map(fmt_duration).unwrap_or_else(|| "–".into());
             let mut spans = vec![
                 "Now playing ".into(),
                 Span::styled(ellipsize(&st.title, 50), Style::new().bold()),
-                format!("  {state}  {pos} / {dur}").into(),
+                format!("  {state}").into(),
             ];
             if let Some(m) = st.last_mbps {
                 spans.push(format!("  ⇣ {m:.1} Mbps").fg(ACCENT));
             }
+            if elsewhere {
+                spans.push("  (cast from another device)".fg(Color::DarkGray));
+            }
             if st.tv_friendly {
                 spans.push("  [TV-friendly, no seek]".fg(Color::DarkGray));
+            } else if !st.seekable && !st.is_loading() {
+                spans.push("  [live stream, no seek]".fg(Color::DarkGray));
             }
             f.render_widget(Line::from(spans), l2);
+            let pos = st.position.map(fmt_duration).unwrap_or_else(|| "–".into());
+            let dur = st.duration.map(fmt_duration).unwrap_or_else(|| "–".into());
             let ratio = match (st.position, st.duration) {
                 (Some(p), Some(d)) if !d.is_zero() => {
                     (p.as_secs_f64() / d.as_secs_f64()).clamp(0.0, 1.0)
                 }
                 _ => 0.0,
             };
-            f.render_widget(
-                LineGauge::default()
-                    .ratio(ratio)
-                    .filled_style(Style::new().fg(ACCENT))
-                    .label(""),
-                l3,
-            );
+            let [el, bar, total] = Layout::horizontal([
+                Constraint::Length(pos.chars().count() as u16 + 1),
+                Constraint::Min(4),
+                Constraint::Length(dur.chars().count() as u16 + 1),
+            ])
+            .areas(l3);
+            f.render_widget(Line::raw(pos), el);
+            f.render_widget(progress_line(ratio, bar.width, st.seekable), bar);
+            f.render_widget(Line::raw(dur).right_aligned(), total);
+            if st.seekable && st.duration.is_some_and(|d| !d.is_zero()) {
+                app.seek_bar = Some(bar);
+            }
         }
         None => f.render_widget(
             Line::styled("Nothing cast from here. Press c to cast a file.", DIM),
             l2,
         ),
     }
+}
+
+/// The progress bar: `━` filled up to `ratio`, dim after it (dotted when it cannot
+/// seek). Drawn by hand so a click column maps exactly onto a time.
+fn progress_line(ratio: f64, width: u16, seekable: bool) -> Line<'static> {
+    let w = usize::from(width);
+    let filled = ((ratio * w as f64).round() as usize).min(w);
+    let rest = if seekable { "━" } else { "┄" };
+    Line::from(vec![
+        Span::styled("━".repeat(filled), Style::new().fg(ACCENT)),
+        Span::styled(rest.repeat(w - filled), DIM),
+    ])
 }
 
 // ---------------------------------------------------------------------- main legend
@@ -193,6 +218,31 @@ const LEGEND: &[(&str, &str)] = &[
     ("q  Esc", "Quit"),
 ];
 
+/// What the keys do differently while a seekable cast plays (replacing the matching
+/// [`LEGEND`] rows).
+const LEGEND_CASTING: &[(&str, &str)] = &[
+    ("↑ ↓ ← →", "D-pad; ← → seek −/+ 10 s"),
+    ("0-9", "Jump to 0 %-90 % of the media"),
+    ("<  >", "Seek −/+ 10 s"),
+    ("click", "Progress bar: jump to that point"),
+];
+
+/// The main legend; `seeking`: a seekable cast plays, so the seek keys are shown.
+fn legend(seeking: bool) -> Vec<(&'static str, &'static str)> {
+    let mut items: Vec<_> = LEGEND
+        .iter()
+        .map(|&(k, d)| match LEGEND_CASTING.iter().find(|(c, _)| *c == k) {
+            Some(&(_, cast)) if seeking => (k, cast),
+            _ => (k, d),
+        })
+        .collect();
+    if seeking {
+        let at = items.iter().position(|(k, _)| *k == "?").unwrap_or(items.len());
+        items.insert(at, LEGEND_CASTING[LEGEND_CASTING.len() - 1]);
+    }
+    items
+}
+
 fn legend_lines(items: &[(&str, &str)]) -> Vec<Line<'static>> {
     items
         .iter()
@@ -205,17 +255,19 @@ fn legend_lines(items: &[(&str, &str)]) -> Vec<Line<'static>> {
         .collect()
 }
 
-fn draw_legend(f: &mut Frame, area: Rect) {
-    let block = Block::bordered().title(" Remote ");
+fn draw_legend(f: &mut Frame, app: &App, area: Rect) {
+    let seeking = app.playing().is_some_and(|s| s.seekable);
+    let block = Block::bordered().title(if seeking { " Remote (casting: keys seek) " } else { " Remote " });
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let half = LEGEND.len().div_ceil(2);
+    let items = legend(seeking);
+    let half = items.len().div_ceil(2);
     if inner.width >= 80 {
         let [a, b] = Layout::horizontal([Constraint::Percentage(50); 2]).areas(inner);
-        f.render_widget(Paragraph::new(legend_lines(&LEGEND[..half])), a);
-        f.render_widget(Paragraph::new(legend_lines(&LEGEND[half..])), b);
+        f.render_widget(Paragraph::new(legend_lines(&items[..half])), a);
+        f.render_widget(Paragraph::new(legend_lines(&items[half..])), b);
     } else {
-        f.render_widget(Paragraph::new(legend_lines(LEGEND)), inner);
+        f.render_widget(Paragraph::new(legend_lines(&items)), inner);
     }
 }
 
@@ -765,6 +817,12 @@ fn draw_help(f: &mut Frame) {
     )];
     lines.extend(legend_lines(LEGEND));
     lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "While a cast plays (from here or another device; not for live streams)",
+        Style::new().bold().fg(ACCENT),
+    ));
+    lines.extend(legend_lines(LEGEND_CASTING));
+    lines.push(Line::raw(""));
     lines.push(Line::styled("Cast flow", Style::new().bold().fg(ACCENT)));
     lines.extend(legend_lines(&[
         (
@@ -931,4 +989,29 @@ fn draw_net_test(f: &mut Frame, stage: &str, ratio: f64) {
             .gauge_style(Style::new().fg(ACCENT)),
         b,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legend_shows_the_seek_keys_while_casting() {
+        let idle = legend(false);
+        assert_eq!(idle.len(), LEGEND.len());
+        assert!(idle.contains(&("<  >", "Rewind / fast forward")));
+        let casting = legend(true);
+        assert_eq!(casting.len(), LEGEND.len() + 1, "plus the click row");
+        assert!(casting.contains(&("<  >", "Seek −/+ 10 s")));
+        assert!(casting.contains(&("0-9", "Jump to 0 %-90 % of the media")));
+        assert!(casting.iter().any(|(k, _)| *k == "click"));
+    }
+
+    #[test]
+    fn progress_line_fills_by_ratio() {
+        let l = progress_line(0.25, 8, true);
+        assert_eq!(l.spans[0].content, "━━");
+        assert_eq!(l.spans[1].content.chars().count(), 6);
+        assert_eq!(progress_line(2.0, 4, false).spans[0].content.chars().count(), 4);
+    }
 }

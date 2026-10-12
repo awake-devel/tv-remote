@@ -21,8 +21,8 @@ use tvremote_core::{
 };
 
 use crate::util::{
-    compat_badge, fmt_age, fmt_duration, is_url, mbps, parse_time, terminal_supports_emoji,
-    verdict_badge,
+    compat_badge, fmt_age, fmt_duration, is_url, mbps, parse_seek, terminal_supports_emoji,
+    verdict_badge, SeekArg,
 };
 
 #[derive(Debug, Parser)]
@@ -113,17 +113,20 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Pause the TV's media renderer.
+    /// Pause what is casting (this TV's media renderer).
     Pause,
-    /// Resume playback.
+    /// Resume a paused cast.
     Play,
-    /// Stop playback.
+    /// Pause when playing, resume when paused.
+    Toggle,
+    /// Stop the cast.
     Stop,
-    /// Seek (direct casts only).
+    /// Seek (not possible in live streams such as TV-friendly casts).
     Seek {
-        /// Position as HH:MM:SS, MM:SS or seconds.
-        #[arg(value_parser = parse_time)]
-        position: Duration,
+        /// Position as HH:MM:SS, MM:SS or seconds; +SECS / -SECS (or +M:SS) to move
+        /// from the current position; or a percentage like 50%.
+        #[arg(value_parser = parse_seek, allow_hyphen_values = true, value_name = "POSITION")]
+        position: SeekArg,
     },
     /// Find Samsung TVs / media renderers on the LAN (SSDP).
     Discover {
@@ -542,10 +545,33 @@ fn dispatch(tv: &Tv, cmd: Command, json: bool) -> CliResult {
         Command::Cast(a) => cmd_cast(tv, a),
         Command::Netcheck(a) => cmd_netcheck(tv, a, json),
         Command::Nettest { yes } => cmd_nettest(tv, yes),
-        Command::Pause => Ok(tv.dlna().pause()?),
-        Command::Play => Ok(tv.dlna().play()?),
-        Command::Stop => Ok(tv.dlna().stop()?),
-        Command::Seek { position } => Ok(tv.dlna().seek(position)?),
+        Command::Pause => {
+            println!("{}", if tv.pause()? { "paused" } else { "already paused" });
+            Ok(())
+        }
+        Command::Play => {
+            println!("{}", if tv.resume()? { "playing" } else { "already playing" });
+            Ok(())
+        }
+        Command::Toggle => {
+            let paused = tv.play_pause()? == tvremote_core::dlna::TransportState::Paused;
+            println!("{}", if paused { "paused" } else { "playing" });
+            Ok(())
+        }
+        Command::Stop => {
+            tv.stop_cast()?;
+            println!("stopped");
+            Ok(())
+        }
+        Command::Seek { position } => {
+            let to = match position {
+                SeekArg::To(to) => tv.seek_to(to)?,
+                SeekArg::By { delta, forward } => tv.seek_relative(delta, forward)?,
+                SeekArg::Fraction(f) => tv.seek_fraction(f)?,
+            };
+            println!("{}", fmt_duration(to));
+            Ok(())
+        }
         Command::Discover { timeout, update } => cmd_discover(tv, timeout, update, json),
         Command::SmartThings { cmd } => cmd_smartthings(tv, cmd, json),
         Command::Tvs { .. } => Err(Failure::new(1, "internal: tvs is handled by run()")),
@@ -1915,7 +1941,21 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["x", "mute", "maybe"]).is_err());
         assert!(matches!(parse(&["seek", "1:02:03"]).command,
-            Some(Command::Seek { position }) if position == Duration::from_secs(3723)));
+            Some(Command::Seek { position }) if position == SeekArg::To(Duration::from_secs(3723))));
+        assert!(matches!(parse(&["seek", "+10"]).command,
+            Some(Command::Seek { position: SeekArg::By { delta, forward: true } }) if delta == Duration::from_secs(10)));
+        assert!(matches!(parse(&["seek", "-1:30"]).command,
+            Some(Command::Seek { position: SeekArg::By { delta, forward: false } }) if delta == Duration::from_secs(90)));
+        assert!(matches!(parse(&["seek", "-10", "--tv", "tv2"]).command,
+            Some(Command::Seek { position: SeekArg::By { forward: false, .. } })));
+        assert!(matches!(parse(&["seek", "50%"]).command,
+            Some(Command::Seek { position: SeekArg::Fraction(f) }) if f == 0.5));
+        assert!(Cli::try_parse_from(["x", "seek", "150%"]).is_err());
+        assert!(Cli::try_parse_from(["x", "seek", "-0"]).is_err(), "a no-op seek");
+        assert!(Cli::try_parse_from(["x", "seek", "1e2"]).is_err());
+        assert!(matches!(parse(&["toggle"]).command, Some(Command::Toggle)));
+        assert!(matches!(parse(&["pause", "--tv", "tv2"]).command, Some(Command::Pause)));
+        assert!(matches!(parse(&["play"]).command, Some(Command::Play)));
         assert!(Cli::try_parse_from(["x", "seek", "1:99:00"]).is_err());
         assert!(matches!(
             parse(&["nettest"]).command,

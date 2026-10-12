@@ -96,9 +96,12 @@ pub fn field(xml: &str, name: &str) -> String {
     }
 }
 
-/// Is this SOAP fault a temporary "not now" (UPnP 701 *Transition not available*, 705
-/// *Transport is locked*)? After a `Seek` the 2025 TV reports `TRANSITIONING` and allows
-/// only `Stop` until it has buffered again (5 to 9 s on a slow link), so `Pause` gets 701. Pure.
+/// Is this SOAP fault a possibly temporary "not now" (UPnP 701 *Transition not
+/// available*, 705 *Transport is locked*)? Right after a `Seek` the 2025 TV briefly
+/// refuses `Pause` / another `Seek` with 701; measured on the LAN it clears within
+/// ~0.2 s. But 701 is also the TV's permanent answer to an impossible transition (Pause
+/// while already paused or stopped, Seek in a live stream), so retries are bounded by
+/// [`settle_delay`]. Pure.
 pub fn is_transient_refusal(err: &Error) -> bool {
     match err {
         Error::Soap { detail, .. } => {
@@ -110,8 +113,35 @@ pub fn is_transient_refusal(err: &Error) -> bool {
 }
 
 /// How many times [`Dlna::pause`] and [`Dlna::seek`] try while the TV refuses
-/// transiently (×0.4 s).
-pub const SETTLE_RETRIES: u32 = 25;
+/// transiently (×0.2 s: at most ~1.4 s of waiting, so a permanent 701 fails fast).
+pub const SETTLE_RETRIES: u32 = 8;
+
+/// Wait before retry number `attempt + 1` of a transient refusal, `None` once
+/// [`SETTLE_RETRIES`] tries were made. Pure.
+pub fn settle_delay(attempt: u32) -> Option<Duration> {
+    (attempt + 1 < SETTLE_RETRIES).then_some(Duration::from_millis(200))
+}
+
+/// A SOAP refusal reworded for people (`TV refused Seek: Illegal seek target` → "the TV
+/// can't jump there …"); other errors are returned as they are. Pure.
+pub fn friendly(err: Error) -> Error {
+    let Error::Soap { action, detail } = &err else { return err };
+    let d = detail.to_ascii_lowercase();
+    let text = if d.contains("illegal seek target") || d.contains("711") {
+        "the TV can't jump to that point (it is at or past the end)"
+    } else if d.contains("transition not available") || d.contains("701") {
+        match action.as_str() {
+            "Seek" => "the TV can't seek right now (a live stream, or it is still buffering)",
+            "Pause" => "the TV can't pause right now (already paused or stopped?)",
+            _ => "the TV can't do that right now: try again in a moment",
+        }
+    } else if d.contains("transport is locked") || d.contains("705") {
+        "the TV is busy loading: try again in a moment"
+    } else {
+        return err;
+    };
+    Error::Playback(text.into())
+}
 
 /// `errorDescription` from a SOAP fault body, if present.
 pub fn parse_fault(body: &str) -> Option<String> {
@@ -232,6 +262,8 @@ pub struct PositionInfo {
     pub duration: Option<Duration>,
     /// URI being played.
     pub track_uri: String,
+    /// DIDL-Lite of the track (unescaped once), if the TV reports it.
+    pub track_metadata: String,
 }
 
 /// DLNA renderer client for one TV. Cheap to clone; `Send + Sync`.
@@ -322,17 +354,20 @@ impl Dlna {
         self.soap(AVT, "Play", "<Speed>1</Speed>").map(|_| ())
     }
 
-    /// An AVTransport action, retried up to [`SETTLE_RETRIES`] times 0.4 s apart while
-    /// the TV answers with a transient refusal ([`is_transient_refusal`]).
+    /// An AVTransport action, retried (see [`settle_delay`]) while the TV answers with a
+    /// possibly transient refusal ([`is_transient_refusal`]).
     fn settled(&self, action: &str, args: &str) -> Result<()> {
         let mut attempt = 0;
         loop {
             match self.soap(AVT, action, args) {
                 Ok(_) => return Ok(()),
-                Err(e) if is_transient_refusal(&e) && attempt + 1 < SETTLE_RETRIES => {
-                    attempt += 1;
-                    std::thread::sleep(Duration::from_millis(400));
-                }
+                Err(e) if is_transient_refusal(&e) => match settle_delay(attempt) {
+                    Some(d) => {
+                        attempt += 1;
+                        std::thread::sleep(d);
+                    }
+                    None => return Err(e),
+                },
                 Err(e) => return Err(e),
             }
         }
@@ -369,6 +404,7 @@ impl Dlna {
             position: parse_hms(&field(&x, "RelTime")),
             duration: parse_hms(&field(&x, "TrackDuration")),
             track_uri: field(&x, "TrackURI"),
+            track_metadata: field(&x, "TrackMetaData"),
         })
     }
 
@@ -458,6 +494,31 @@ mod tests {
         assert_eq!(TransportState::parse(&field(r, "CurrentTransportState")), TransportState::Playing);
         assert_eq!(field(r, "TrackURI"), "http://a/b?c=1&d=2");
         assert_eq!(field(r, "Missing"), "");
+    }
+
+    #[test]
+    fn transient_refusals_are_retried_briefly() {
+        let total: Duration = (0..).map_while(settle_delay).sum();
+        assert!(total <= Duration::from_secs(2), "a permanent 701 must fail fast ({total:?})");
+        assert!(total >= Duration::from_millis(400), "a 701 right after a seek clears in ~0.2 s");
+        assert_eq!(settle_delay(SETTLE_RETRIES), None);
+    }
+
+    #[test]
+    fn refusals_are_reworded() {
+        let soap = |a: &str, d: &str| Error::Soap { action: a.into(), detail: d.into() };
+        let msg = |e: Error| friendly(e).to_string();
+        assert!(msg(soap("Seek", "Illegal seek target")).contains("can't jump to that point"));
+        assert!(msg(soap("Pause", "Transition not available")).contains("already paused"));
+        assert!(msg(soap("Seek", "Transition not available")).contains("live stream"));
+        assert!(msg(soap("Play", "Transport is locked")).contains("busy loading"));
+        assert!(matches!(friendly(soap("Play", "Invalid InstanceID")), Error::Soap { .. }));
+        assert!(matches!(friendly(Error::NotCasting), Error::NotCasting));
+        // Reads cleanly after the CLI's "error: " (no "unsupported: " in between).
+        assert_eq!(
+            friendly(soap("Seek", "Illegal seek target")).to_string(),
+            "the TV can't jump to that point (it is at or past the end)"
+        );
     }
 
     #[test]

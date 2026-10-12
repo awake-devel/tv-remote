@@ -22,6 +22,17 @@ Pages: `remote`, `touchpad`, `apps`, `cast`, `picture`, `device`.
 
 Every button of the physical remote: power, Source, Menu, Info, Guide, Tools, Exit, the arrows and OK, Back, Home, volume, mute, channels and channel list, the number pad, the four colour keys, and the media keys (rewind, play, pause, stop, fast-forward). Hover a button to see its key code.
 
+**While something is casting** to the TV, from this app or from another device or program, a **now-playing bar** appears at the top of the page: the title, a play/pause button, the elapsed time, a seek bar and the length. It works like a video player's:
+
+- click anywhere on the bar to jump to that point;
+- drag the knob to scrub: the elapsed time shows where you will land, and the TV seeks when you let go;
+- hover the bar to see the time under the pointer;
+- click the length to show the time left instead.
+
+A live stream (a TV-friendly cast, or a radio-like URL) can't seek: the bar is greyed out and its tooltip says why.
+
+While a cast plays, the media keys control it instead of being sent as they are: **play** and **pause** pause or resume it, **stop** stops it, and **rewind** / **fast-forward** jump back or forward 10 seconds. The **←** and **→** arrows (buttons and keyboard) also jump 10 seconds. For a live stream, rewind, fast-forward and the arrows stay plain keys, so the arrows still move through the TV's menus. With nothing casting, every key is sent as usual.
+
 Keyboard shortcuts work on the **Remote** and **Touchpad & Keyboard** pages, as long as the focus isn't in a text field:
 
 | Key | TV key |
@@ -35,6 +46,9 @@ Keyboard shortcuts work on the **Remote** and **Touchpad & Keyboard** pages, as 
 | `H` | Home |
 | Page Up / Page Down | channel up / down |
 | `0` to `9` | digits |
+| Play, Pause, Stop, Rewind, Forward media keys | the matching TV keys (if the desktop doesn't use them itself) |
+
+While a cast plays, ← and → seek 10 seconds, as the buttons do. The Remote page notices a cast started from another device within 3 seconds while it is open; on the Touchpad page, the arrows only seek in a cast started from this app.
 
 ### Touchpad & Keyboard
 
@@ -69,7 +83,7 @@ When you pick a file, the right side shows:
 - **Network check**: whether your network can carry this stream, with suggested fixes you can click. **Test network** measures your network.
 - **Cast to the TV**: starts playback. It becomes available once the network check has a verdict.
 - **Cast a link**: an http(s) media URL that the TV fetches itself.
-- **Now playing**: title, position, pause/resume, stop, seek (direct casts only), and the throughput graph.
+- **Now playing**: title, pause/resume, stop, the seek bar (click a point to jump there, drag to scrub; greyed out for TV-friendly casts, which can't seek), and the throughput graph.
 
 The stream comes from the app, so closing the window stops playback. The app asks first.
 
@@ -95,7 +109,7 @@ Some TVs accept picture and sound mode changes without applying them. The page s
 
 Run `tv-remote-tui` with no arguments to start the terminal UI. Add `--tv <name>` to control another TV than the active one.
 
-The main view shows the TV, its state, and what's playing. The bottom line lists the keys for the current screen. Press `?` or F1 for help.
+The main view shows the TV, its state, and what's playing: a cast from the terminal UI, or one started from another device or program (checked every 3 seconds). Under the title, a progress bar sits between the elapsed time and the length. **Click the bar to jump to that point.** The bottom line lists the keys for the current screen. Press `?` or F1 for help.
 
 ### Main view
 
@@ -113,9 +127,9 @@ The main view shows the TV, its state, and what's playing. The bottom line lists
 | `G` | Guide |
 | `x` | Exit |
 | Page Up / Page Down | channel up / down |
-| `0` to `9` | digits |
+| `0` to `9` | digits; while casting, jump to 0 % to 90 % of the media |
 | F2, F3, F4, F5 | red, green, yellow, blue |
-| `<` / `>` | rewind / fast-forward |
+| `<` / `>` | rewind / fast-forward; while casting, back / forward 10 s |
 | `p` | power: turn off if on, else turn on |
 | Space | pause or resume the cast |
 | `s` | stop the cast |
@@ -126,6 +140,8 @@ The main view shows the TV, its state, and what's playing. The bottom line lists
 | `T` | TV picker |
 | `?` or F1 | help |
 | `q` or Esc | quit |
+
+While a cast plays, ← and → also jump back or forward 10 seconds, and the legend says so. For a live stream (TV-friendly cast) that can't seek, the arrows, `<` `>` and the digits keep their usual TV meaning. The digits jump like in mpv only during a cast: pressing a channel number would leave the TV's player anyway.
 
 ### TV picker (`T`)
 

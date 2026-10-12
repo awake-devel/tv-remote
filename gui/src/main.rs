@@ -7,6 +7,7 @@ mod ctx;
 mod format;
 mod pages;
 mod pointer_lock;
+mod seekbar;
 mod window;
 
 use adw::prelude::*;

@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 pub use cast::{
     CastEvent, CastMode, CastOutcome, CastProfile, CastRequest, CastSession, CastSource, CastStatus,
+    SEEK_STEP,
 };
 pub use config::{AppConfig, Config, SharedConfig, TvEntry};
 pub use error::{Error, Result};
@@ -64,6 +65,20 @@ pub enum YouTubeOpened {
     /// DIAL with 403), so the app was launched over REST instead.
     AppOnly,
 }
+
+/// What [`Tv::media_key`] did with a remote key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaKeyOutcome {
+    /// Sent to the TV as a plain key (nothing casting, a live stream for ← →, or not a
+    /// media key).
+    Sent,
+    /// Play / pause toggled; the new state.
+    Toggled(dlna::TransportState),
+    /// The cast was stopped.
+    Stopped,
+    /// Seeked to this position.
+    Seeked(Duration),
+}
 pub use smartthings_auth::{AuthMethod, AuthStatus, StAuth};
 
 /// Crate version.
@@ -83,11 +98,18 @@ struct TvInner {
     cloud: Mutex<Option<(CloudState, Instant)>>,
     /// The linked SmartThings device, once fetched.
     st_device: Mutex<Option<smartthings::StDevice>>,
+    /// Last renderer observation by [`Tv::transport`]: `Some(seekable)` when a cast
+    /// (from anywhere) was playing, paused or buffering; and when.
+    renderer_seen: Mutex<Option<(Option<bool>, Instant)>>,
+    /// Last seek target sent for a cast started elsewhere.
+    seek_memo: cast::SeekMemo,
 }
 
 /// How long a LAN / cloud observation counts for routing decisions.
 const HINT_TTL: Duration = Duration::from_secs(30);
 const CLOUD_TTL: Duration = Duration::from_secs(120);
+/// How long a renderer observation decides what ← → do ([`Tv::media_key`]).
+const RENDERER_TTL: Duration = Duration::from_secs(5);
 
 impl Drop for TvInner {
     fn drop(&mut self) {
@@ -212,6 +234,8 @@ impl Tv {
                 lan_seen: Mutex::new(None),
                 cloud: Mutex::new(None),
                 st_device: Mutex::new(None),
+                renderer_seen: Mutex::new(None),
+                seek_memo: cast::SeekMemo::default(),
             }),
         }
     }
@@ -860,8 +884,223 @@ impl Tv {
     /// Transport state and position of whatever the TV's DLNA renderer is playing
     /// (also works for casts started elsewhere, e.g. by `tv-cast`).
     pub fn transport(&self) -> Result<(dlna::TransportInfo, dlna::PositionInfo)> {
-        let d = self.dlna();
-        Ok((d.transport_info()?, d.position_info()?))
+        let d = self.lan_dlna()?;
+        let (ti, pi) = (d.transport_info()?, d.position_info()?);
+        self.note_renderer(cast::renderer_activity(&ti.state, &pi));
+        Ok((ti, pi))
+    }
+
+    fn note_renderer(&self, activity: Option<bool>) {
+        if let Ok(mut g) = self.inner.renderer_seen.lock() {
+            *g = Some((activity, Instant::now()));
+        }
+    }
+
+    /// What is casting: this app's session, else (one SOAP round trip) a cast started
+    /// elsewhere as the renderer reports it ([`CastStatus::from_renderer`]). `None` when
+    /// nothing is.
+    pub fn now_playing(&self) -> Result<Option<CastStatus>> {
+        if let Some(s) = self.current_cast() {
+            return Ok(Some(s.status()));
+        }
+        let (ti, pi) = self.transport()?;
+        Ok(CastStatus::from_renderer(&ti.state, &pi))
+    }
+
+    /// A cast started elsewhere, read now: [`Error::NotCasting`] when there is none.
+    fn external_cast(&self) -> Result<(dlna::Dlna, CastStatus)> {
+        let (ti, pi) = self.transport()?;
+        let st = CastStatus::from_renderer(&ti.state, &pi).ok_or(Error::NotCasting)?;
+        Ok((self.dlna(), st))
+    }
+
+    // ----- playback control (this app's cast, else one started elsewhere) ------------
+
+    /// Pause when playing (or buffering), else resume: this app's session if any, else
+    /// whatever the TV's renderer plays (a cast started by another process). Returns the
+    /// new state (`Playing` / `Paused`); [`Error::NotCasting`] when nothing is loaded or
+    /// it is stopped (`Play` would replay a URL whose server may be gone).
+    pub fn play_pause(&self) -> Result<dlna::TransportState> {
+        use dlna::TransportState;
+        if let Some(s) = self.current_cast() {
+            return s.play_pause();
+        }
+        let (d, st) = self.external_cast()?;
+        let r = if is_playing(&st) {
+            if st.tv_friendly {
+                return Err(cast::live_pause());
+            }
+            d.pause().map(|_| TransportState::Paused)
+        } else {
+            d.play().map(|_| TransportState::Playing)
+        };
+        r.map_err(dlna::friendly)
+    }
+
+    /// Pause what is casting. `Ok(false)` when it already was paused (the TV would
+    /// refuse a second `Pause`); [`Error::NotCasting`] when nothing is.
+    pub fn pause(&self) -> Result<bool> {
+        let st = self.now_playing()?.ok_or(Error::NotCasting)?;
+        if !is_playing(&st) {
+            return Ok(false);
+        }
+        if st.tv_friendly {
+            return Err(cast::live_pause());
+        }
+        let r = match self.current_cast() {
+            Some(s) => s.pause(),
+            None => self.dlna().pause(),
+        };
+        r.map(|_| true).map_err(dlna::friendly)
+    }
+
+    /// Resume what is casting. `Ok(false)` when it already was playing;
+    /// [`Error::NotCasting`] when nothing is loaded or it is stopped.
+    pub fn resume(&self) -> Result<bool> {
+        let st = self.now_playing()?.ok_or(Error::NotCasting)?;
+        if is_playing(&st) {
+            return Ok(false);
+        }
+        let r = match self.current_cast() {
+            Some(s) => s.resume(),
+            None => self.dlna().play(),
+        };
+        r.map(|_| true).map_err(dlna::friendly)
+    }
+
+    /// Stop what is casting (this app's session, else the renderer);
+    /// [`Error::NotCasting`] when nothing is.
+    pub fn stop_cast(&self) -> Result<()> {
+        let r = match self.current_cast() {
+            Some(s) => s.stop(),
+            None => {
+                let (d, _) = self.external_cast()?;
+                d.stop()
+            }
+        };
+        if r.is_ok() {
+            self.note_renderer(None);
+        }
+        r.map_err(dlna::friendly)
+    }
+
+    /// Seek to an absolute position, kept inside the media ([`cast::clamp_target`]):
+    /// this app's session, else a cast started elsewhere. Returns the target sent. Live
+    /// streams (and casts still loading) give [`Error::Playback`].
+    pub fn seek_to(&self, to: Duration) -> Result<Duration> {
+        if let Some(s) = self.current_cast() {
+            let to = cast::clamp_target(to, s.status().duration);
+            return s.seek(to).map(|_| to);
+        }
+        let (d, st) = self.external_cast()?;
+        if !st.seekable {
+            return Err(st.no_seek_error());
+        }
+        let to = cast::clamp_target(to, st.duration);
+        d.seek(to).map_err(dlna::friendly)?;
+        self.inner.seek_memo.record(to);
+        Ok(to)
+    }
+
+    /// Seek `delta` forward or back (clamped to the media; see
+    /// [`cast::relative_target`]); returns the target. Quick repeated calls add up.
+    pub fn seek_relative(&self, delta: Duration, forward: bool) -> Result<Duration> {
+        if let Some(s) = self.current_cast() {
+            return s.seek_relative(delta, forward);
+        }
+        let (d, st) = self.external_cast()?;
+        if !st.seekable {
+            return Err(st.no_seek_error());
+        }
+        let pos = self.inner.seek_memo.base(st.position).ok_or_else(cast::position_unknown)?;
+        let to = cast::relative_target(pos, delta, forward, st.duration);
+        d.seek(to).map_err(dlna::friendly)?;
+        self.inner.seek_memo.record(to);
+        Ok(to)
+    }
+
+    /// Seek to `fraction` (0.0-1.0) of the media's length; returns the target.
+    pub fn seek_fraction(&self, fraction: f64) -> Result<Duration> {
+        if let Some(s) = self.current_cast() {
+            return s.seek_fraction(fraction);
+        }
+        let (d, st) = self.external_cast()?;
+        let len = st
+            .duration
+            .filter(|_| st.seekable)
+            .ok_or_else(|| st.no_seek_error())?;
+        let to = cast::fraction_target(len, fraction);
+        d.seek(to).map_err(dlna::friendly)?;
+        self.inner.seek_memo.record(to);
+        Ok(to)
+    }
+
+    /// A remote key that acts on the cast while one plays, as on the TV's own remote:
+    /// Play / Pause toggle playback, Stop stops the cast, Rewind / FastForward and
+    /// Left / Right seek ∓/± [`SEEK_STEP`]. Every other key, and every key when nothing
+    /// is casting, is sent as usual; so are the seek keys for a live stream (Left /
+    /// Right must still move through the TV's menus).
+    ///
+    /// Cost: this app's session is known without I/O. For a cast started elsewhere the
+    /// media keys ask the renderer (one SOAP round trip) unless it was seen less than
+    /// 5 s ago, while Left / Right only use that recent observation and never wait for
+    /// the network, so menu navigation stays as fast as a plain key. A front-end that
+    /// polls [`Tv::now_playing`] while it shows the remote keeps the observation fresh.
+    ///
+    /// If the cast turns out to be gone (stopped elsewhere since it was seen), the key
+    /// is sent as usual instead.
+    pub fn media_key(&self, key: &Key) -> Result<MediaKeyOutcome> {
+        match self.cast_key(key) {
+            Err(Error::NotCasting) => self.send_key(key).map(|_| MediaKeyOutcome::Sent),
+            r => r,
+        }
+    }
+
+    fn cast_key(&self, key: &Key) -> Result<MediaKeyOutcome> {
+        let arrow = matches!(key, Key::Left | Key::Right);
+        let media = matches!(key, Key::Play | Key::Pause | Key::Stop | Key::Rewind | Key::FastForward);
+        let casting = if !(arrow || media) {
+            None
+        } else if let Some(s) = self.current_cast() {
+            Some(s.status().seekable)
+        } else {
+            self.renderer_activity(media)
+        };
+        let Some(seekable) = casting else {
+            return self.send_key(key).map(|_| MediaKeyOutcome::Sent);
+        };
+        match key {
+            Key::Play | Key::Pause => self.play_pause().map(MediaKeyOutcome::Toggled),
+            Key::Stop => self.stop_cast().map(|_| MediaKeyOutcome::Stopped),
+            Key::Rewind | Key::Left if seekable => {
+                self.seek_relative(SEEK_STEP, false).map(MediaKeyOutcome::Seeked)
+            }
+            Key::FastForward | Key::Right if seekable => {
+                self.seek_relative(SEEK_STEP, true).map(MediaKeyOutcome::Seeked)
+            }
+            _ => self.send_key(key).map(|_| MediaKeyOutcome::Sent),
+        }
+    }
+
+    /// `Some(seekable)` if the renderer was recently seen casting; with `probe`, a stale
+    /// (or missing) observation is refreshed first. An unreachable renderer counts as
+    /// "nothing casting".
+    fn renderer_activity(&self, probe: bool) -> Option<bool> {
+        let seen = self
+            .inner
+            .renderer_seen
+            .lock()
+            .ok()
+            .and_then(|g| *g)
+            .filter(|(_, at)| at.elapsed() < RENDERER_TTL);
+        match seen {
+            Some((activity, _)) => activity,
+            None if probe => self
+                .transport()
+                .ok()
+                .and_then(|(ti, pi)| cast::renderer_activity(&ti.state, &pi)),
+            None => None,
+        }
     }
 
     // ----- network check ----------------------------------------------------------------
@@ -1039,6 +1278,15 @@ pub fn default_config_path() -> PathBuf {
     Config::default_path()
 }
 
+/// Playing, or buffering towards it.
+fn is_playing(st: &CastStatus) -> bool {
+    matches!(
+        st.state,
+        Some(dlna::TransportState::Playing | dlna::TransportState::Transitioning)
+    )
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,6 +1362,36 @@ mod tests {
         // No host and no cloud: fails fast with the LAN error, no I/O.
         assert!(matches!(tv.set_volume(10), Err(Error::Config(_))));
         assert_eq!(tv.cloud_state(), CloudState::NotLinked);
+    }
+
+    #[test]
+    fn playback_control_without_a_cast_fails_cleanly() {
+        // No host: every call fails fast with the LAN error, without I/O.
+        let tv = Tv::new(Config::default());
+        assert!(matches!(tv.play_pause(), Err(Error::Config(_))));
+        assert!(matches!(tv.stop_cast(), Err(Error::Config(_))));
+        assert!(matches!(tv.pause(), Err(Error::Config(_))));
+        assert!(matches!(tv.resume(), Err(Error::Config(_))));
+        assert!(matches!(tv.seek_to(Duration::from_secs(5)), Err(Error::Config(_))));
+        assert!(matches!(tv.seek_relative(SEEK_STEP, true), Err(Error::Config(_))));
+        assert!(matches!(tv.seek_fraction(0.5), Err(Error::Config(_))));
+        assert!(matches!(tv.now_playing(), Err(Error::Config(_))));
+        // Arrows never ask the renderer: with no recent observation they stay plain
+        // keys (here: the remote channel has no host either).
+        assert!(tv.renderer_activity(false).is_none());
+    }
+
+    #[test]
+    fn arrows_follow_the_last_renderer_observation() {
+        let tv = Tv::new(Config::default());
+        tv.note_renderer(Some(true));
+        assert_eq!(tv.renderer_activity(false), Some(true));
+        tv.note_renderer(None);
+        assert_eq!(tv.renderer_activity(false), None);
+        if let Ok(mut g) = tv.inner.renderer_seen.lock() {
+            *g = Some((Some(true), Instant::now() - RENDERER_TTL - Duration::from_secs(1)));
+        }
+        assert_eq!(tv.renderer_activity(false), None, "stale observations are ignored");
     }
 
     #[test]

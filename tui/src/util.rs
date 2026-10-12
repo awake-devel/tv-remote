@@ -98,6 +98,14 @@ pub fn parse_time(s: &str) -> Result<Duration, String> {
     let mut total = 0.0f64;
     for (i, p) in parts.iter().enumerate() {
         let last = i == parts.len() - 1;
+        // Plain digits (and one decimal point in the last field): f64 parsing alone
+        // would take `1e2`, `inf` or `nan`.
+        let decimal = last && p.matches('.').count() <= 1;
+        if !p.chars().any(|c| c.is_ascii_digit())
+            || !p.chars().all(|c| c.is_ascii_digit() || (decimal && c == '.'))
+        {
+            return Err(format!("invalid time '{s}'"));
+        }
         let v: f64 = if last {
             p.parse().map_err(|_| format!("invalid time '{s}'"))?
         } else {
@@ -114,6 +122,59 @@ pub fn parse_time(s: &str) -> Result<Duration, String> {
         total = total * 60.0 + v;
     }
     Ok(Duration::from_secs_f64(total))
+}
+
+/// Where `seek` goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SeekArg {
+    /// An absolute position.
+    To(Duration),
+    /// Forward (`+`) or back (`-`) from the current position.
+    By { delta: Duration, forward: bool },
+    /// A point of the media, 0.0-1.0 (`50%` → 0.5).
+    Fraction(f64),
+}
+
+/// Parse a `seek` argument: `1:02:03` / `90` (absolute), `+10` / `-1:30` (relative),
+/// or `50%` (0-100).
+pub fn parse_seek(s: &str) -> Result<SeekArg, String> {
+    let s = s.trim();
+    if let Some(p) = s.strip_suffix('%') {
+        let p = p.trim();
+        let plain = p.chars().any(|c| c.is_ascii_digit())
+            && p.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && p.matches('.').count() <= 1;
+        let v: f64 = p
+            .parse()
+            .ok()
+            .filter(|_| plain)
+            .ok_or_else(|| format!("invalid percentage '{s}'"))?;
+        if !(0.0..=100.0).contains(&v) {
+            return Err(format!("invalid percentage '{s}' (0-100)"));
+        }
+        return Ok(SeekArg::Fraction(v / 100.0));
+    }
+    let (t, forward) = match (s.strip_prefix('+'), s.strip_prefix('-')) {
+        (Some(t), _) => (t, true),
+        (_, Some(t)) => (t, false),
+        _ => return parse_time(s).map(SeekArg::To),
+    };
+    let delta = parse_time(t)?;
+    // ±0 would only jump back to the last keyframe.
+    if delta.is_zero() {
+        return Err(format!("'{s}' doesn't move"));
+    }
+    Ok(SeekArg::By { delta, forward })
+}
+
+/// Fraction (0.0-1.0) of a progress bar `width` cells wide starting at column `x`
+/// that a click on column `col` points at: the first cell is 0 %, the last 100 %.
+pub fn column_fraction(col: u16, x: u16, width: u16) -> f64 {
+    if width <= 1 {
+        return 0.0;
+    }
+    let off = col.saturating_sub(x).min(width - 1);
+    f64::from(off) / f64::from(width - 1)
 }
 
 /// True for `http://` / `https://` sources.
@@ -155,6 +216,48 @@ mod tests {
         assert!(parse_time("").is_err());
         assert!(parse_time("1:2:3:4").is_err());
         assert!(parse_time("-5").is_err());
+        for bad in ["1e2", "inf", "nan", "NaN", "1.2.3", ".", "1:2.5:3", "+5"] {
+            assert!(parse_time(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse_time("2.5").unwrap(), Duration::from_millis(2500));
+        assert_eq!(parse_time(".5").unwrap(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn seek_arguments() {
+        assert_eq!(parse_seek("1:02:03").unwrap(), SeekArg::To(Duration::from_secs(3723)));
+        assert_eq!(parse_seek("90").unwrap(), SeekArg::To(Duration::from_secs(90)));
+        assert_eq!(
+            parse_seek("+10").unwrap(),
+            SeekArg::By { delta: Duration::from_secs(10), forward: true }
+        );
+        assert_eq!(
+            parse_seek("-1:30").unwrap(),
+            SeekArg::By { delta: Duration::from_secs(90), forward: false }
+        );
+        assert_eq!(parse_seek("50%").unwrap(), SeekArg::Fraction(0.5));
+        assert_eq!(parse_seek("12.5 %").unwrap(), SeekArg::Fraction(0.125));
+        assert!(parse_seek("101%").is_err());
+        assert!(parse_seek("-5%").is_err());
+        assert!(parse_seek("+").is_err());
+        assert!(parse_seek("+0").is_err());
+        assert!(parse_seek("-0:00").is_err());
+        assert!(parse_seek("+1e1").is_err());
+        assert!(parse_seek("inf%").is_err());
+        assert!(parse_seek("nan%").is_err());
+        assert!(parse_seek("1e1%").is_err());
+        assert!(parse_seek("+-3").is_err());
+        assert!(parse_seek("abc").is_err());
+    }
+
+    #[test]
+    fn progress_bar_clicks() {
+        assert_eq!(column_fraction(10, 10, 41), 0.0);
+        assert_eq!(column_fraction(50, 10, 41), 1.0);
+        assert_eq!(column_fraction(30, 10, 41), 0.5);
+        assert_eq!(column_fraction(5, 10, 41), 0.0, "left of the bar");
+        assert_eq!(column_fraction(90, 10, 41), 1.0, "right of the bar");
+        assert_eq!(column_fraction(3, 3, 1), 0.0);
     }
 
     #[test]

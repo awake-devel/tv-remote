@@ -76,10 +76,11 @@ Common keys:
 | `cast <FILE\|URL>` | cast a file or an http(s) URL; stays attached until playback ends (Ctrl-C stops it) | `tv-remote-tui cast film.mkv` |
 | `netcheck <FILE>` | list the tracks, the compatibility, the network demand, the verdict and fixes; nothing is cast, it only asks the TV (one local request) whether it is wired or on Wi-Fi | `tv-remote-tui netcheck film.mkv` |
 | `nettest --yes` | measure the network capacity (plays a test pattern on the TV for about 10 s) | `tv-remote-tui nettest --yes` |
-| `pause` | pause the TV's media player | `tv-remote-tui pause` |
-| `play` | resume playback | `tv-remote-tui play` |
-| `stop` | stop playback | `tv-remote-tui stop` |
-| `seek <POSITION>` | seek, as `HH:MM:SS`, `MM:SS` or seconds (direct casts only) | `tv-remote-tui seek 1:02:30` |
+| `pause` | pause what is casting (says so if it already is paused) | `tv-remote-tui pause` |
+| `play` | resume a paused cast; with nothing loaded or a stopped cast, fails with "nothing is casting" | `tv-remote-tui play` |
+| `toggle` | pause when playing, resume when paused | `tv-remote-tui toggle` |
+| `stop` | stop the cast | `tv-remote-tui stop` |
+| `seek <POSITION>` | seek to `HH:MM:SS`, `MM:SS` or seconds; `+SECS` / `-SECS` (or `+M:SS`) from the current position; or a percentage like `50%`. A target at or past the end goes to 1 second before it. Prints the position it went to. Not possible in TV-friendly (live) casts | `tv-remote-tui seek 1:02:30`, `seek +10`, `seek -1:30`, `seek 50%` |
 
 Options for `cast` and `netcheck`:
 

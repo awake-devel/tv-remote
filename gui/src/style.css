@@ -10,6 +10,7 @@
 .tv-green:hover { background: shade(#2ec27e, 1.1); }
 .tv-yellow:hover { background: shade(#f6d32d, 1.1); }
 .tv-blue:hover { background: shade(#3584e4, 1.1); }
+.tv-castbar { padding: 12px; }
 
 /* Touchpad */
 .tv-touchpad-frame { border-radius: 12px; }

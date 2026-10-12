@@ -5,7 +5,7 @@
 mod browser;
 mod netcard;
 mod options;
-mod playing;
+pub mod playing;
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;

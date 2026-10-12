@@ -160,7 +160,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
     }
 
     // --- pages ------------------------------------------------------------------------------
-    let remote_w = remote::build(&ctx);
+    let (remote_w, cast_bar) = remote::build(&ctx);
     let touch = TouchpadPage::new(&ctx);
     let apps = AppsPage::new(&ctx);
     let cast = CastPage::new(&ctx);
@@ -352,6 +352,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
         let wctx = ctx.weak();
         let stack = stack.clone();
         let (apps, picture, device, cast) = (apps.clone(), picture.clone(), device.clone(), cast.clone());
+        let cast_bar = cast_bar.clone();
         let (conn_state, power_state, update_status) = (conn_state.clone(), power_state.clone(), update_status.clone());
         let switcher = switcher.clone();
         ctx.on_tv_changed(move || {
@@ -367,6 +368,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
             picture.on_tv_changed(shown("picture"));
             device.on_tv_changed(shown("device"));
             cast.on_tv_changed();
+            cast_bar.on_tv_changed();
             c.toast(&format!("Now controlling {}", tv.display_name()));
         });
     }
@@ -389,6 +391,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
         let stack = stack.clone();
         let touch = touch.clone();
         let cast = cast.clone();
+        let cast_bar = cast_bar.clone();
         let device = device.clone();
         let picture = picture.clone();
         let ime_hint_shown = Rc::new(Cell::new(false));
@@ -422,6 +425,7 @@ pub fn build(app: &adw::Application, start_page: Option<&str>) {
                 }
                 // Casts are followed whatever TV they play on.
                 cast.handle_event(&te.tv, &ev);
+                cast_bar.handle_event(&te.tv, &ev);
                 if te.tv != c.tv().id() {
                     if let Event::Connection(ConnectionState::Unauthorized) = ev {
                         let name = c.fleet.tv(&te.tv).map(|t| t.display_name()).unwrap_or(te.tv);

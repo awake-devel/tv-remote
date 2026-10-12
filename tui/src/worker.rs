@@ -14,7 +14,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use tvremote_core::cast::{vaapi_available, CastRequest, CastSession, MediaInfo};
+use tvremote_core::cast::{vaapi_available, CastRequest, CastSession, CastStatus, MediaInfo};
 use tvremote_core::dlna::TransportState;
 use tvremote_core::netcheck::{
     self, CapacityMeasurement, CapacityProgress, LinkInfo, PacketProfile,
@@ -69,6 +69,9 @@ pub enum Msg {
     },
     /// `T` picker: LAN + SmartThings detection finished.
     Scanned(Box<tvremote_core::ScanReport>),
+    /// What the TV's renderer plays when nothing is cast from here (`None`: nothing,
+    /// or the TV did not answer).
+    Renderer(Option<CastStatus>),
 }
 
 /// Quick commands executed in order by the command worker.
@@ -81,6 +84,21 @@ pub enum Cmd {
     PlayPause(Option<CastSession>),
     /// Stop: the cast session if any, else the current TV's renderer.
     Stop(Option<CastSession>),
+    /// Seek ± [`tvremote_core::SEEK_STEP`]: the cast session if any, else the current
+    /// TV's renderer. If that cast is gone (stopped elsewhere since the last poll),
+    /// `key` is sent instead, so ← → still move through the TV's menus.
+    Seek {
+        session: Option<CastSession>,
+        forward: bool,
+        key: Key,
+    },
+    /// Jump to `fraction` (0.0-1.0) of the media: the cast session if any, else the
+    /// current TV's renderer. `key` (a digit) is sent instead if the cast is gone.
+    SeekFraction {
+        session: Option<CastSession>,
+        fraction: f64,
+        key: Option<Key>,
+    },
     LaunchApp(App),
     YouTube(String),
 }
@@ -177,6 +195,13 @@ impl Workers {
                 format!("cannot start a worker thread: {e}"),
             );
         }
+    }
+
+    /// Read what the current TV's renderer plays (a cast started elsewhere).
+    pub fn poll_renderer(&self) {
+        self.spawn("tui-renderer", |tv, tx| {
+            let _ = tx.send(Msg::Renderer(tv.now_playing().ok().flatten()));
+        });
     }
 
     pub fn fetch_apps(&self) {
@@ -312,41 +337,46 @@ fn command_worker(shared: Arc<Mutex<Tv>>, rx: Receiver<Cmd>, tx: Sender<Msg>) {
                 Err(e) => log(&tx, Level::Error, format!("Typing failed: {e}")),
             },
             Cmd::RefreshVolume => refresh_volume(&tv, &tx),
-            Cmd::PlayPause(Some(s)) => {
-                let r = if s.status().state == Some(TransportState::Playing) {
-                    s.pause().map(|_| "Paused")
-                } else {
-                    s.resume().map(|_| "Playing")
+            Cmd::PlayPause(session) => {
+                let r = match session.filter(|s| !s.is_finished()) {
+                    Some(s) => s.play_pause(),
+                    None => tv.play_pause(),
                 };
                 match r {
-                    Ok(s) => log(&tx, Level::Info, s),
-                    Err(e) => log(&tx, Level::Error, format!("Play/pause: {e}")),
-                }
-            }
-            Cmd::PlayPause(None) => {
-                let session = tv.current_cast();
-                let r = tv.transport().and_then(|(ti, _)| {
-                    let playing = ti.state == TransportState::Playing;
-                    match (&session, playing) {
-                        (Some(s), true) => s.pause().map(|_| "Paused"),
-                        (Some(s), false) => s.resume().map(|_| "Playing"),
-                        (None, true) => tv.dlna().pause().map(|_| "Paused"),
-                        (None, false) => tv.dlna().play().map(|_| "Playing"),
-                    }
-                });
-                match r {
-                    Ok(s) => log(&tx, Level::Info, s),
+                    Ok(TransportState::Paused) => log(&tx, Level::Info, "Paused"),
+                    Ok(_) => log(&tx, Level::Info, "Playing"),
                     Err(e) => log(&tx, Level::Error, format!("Play/pause: {e}")),
                 }
             }
             Cmd::Stop(session) => {
-                let r = match session.filter(|s| !s.is_finished()).or_else(|| tv.current_cast()) {
+                let r = match session.filter(|s| !s.is_finished()) {
                     Some(s) => s.stop(),
-                    None => tv.dlna().stop(),
+                    None => tv.stop_cast(),
                 };
                 match r {
                     Ok(()) => log(&tx, Level::Info, "Stopped"),
                     Err(e) => log(&tx, Level::Error, format!("Stop: {e}")),
+                }
+            }
+            Cmd::Seek { session, forward, key } => {
+                let step = tvremote_core::SEEK_STEP;
+                let r = match session.filter(|s| !s.is_finished()) {
+                    Some(s) => s.seek_relative(step, forward),
+                    None => tv.seek_relative(step, forward),
+                };
+                match r {
+                    Err(Error::NotCasting) => instead(&tv, &tx, &key),
+                    r => log_seek(&tx, r),
+                }
+            }
+            Cmd::SeekFraction { session, fraction, key } => {
+                let r = match session.filter(|s| !s.is_finished()) {
+                    Some(s) => s.seek_fraction(fraction),
+                    None => tv.seek_fraction(fraction),
+                };
+                match (r, key) {
+                    (Err(Error::NotCasting), Some(key)) => instead(&tv, &tx, &key),
+                    (r, _) => log_seek(&tx, r),
                 }
             }
             Cmd::LaunchApp(app) => match tv.launch_app(&app) {
@@ -363,6 +393,21 @@ fn command_worker(shared: Arc<Mutex<Tv>>, rx: Receiver<Cmd>, tx: Sender<Msg>) {
                 Err(e) => log(&tx, Level::Error, format!("YouTube: {e}")),
             },
         }
+    }
+}
+
+/// The cast meant by a seek key is gone: forget it and send the key.
+fn instead(tv: &Tv, tx: &Sender<Msg>, key: &Key) {
+    let _ = tx.send(Msg::Renderer(None));
+    if let Err(e) = tv.send_key(key) {
+        log(tx, Level::Error, format!("{}: {e}", key.label()));
+    }
+}
+
+fn log_seek(tx: &Sender<Msg>, r: Result<Duration, Error>) {
+    match r {
+        Ok(to) => log(tx, Level::Info, format!("Seek to {}", crate::util::fmt_duration(to))),
+        Err(e) => log(tx, Level::Error, format!("Seek: {e}")),
     }
 }
 

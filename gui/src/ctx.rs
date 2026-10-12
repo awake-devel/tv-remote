@@ -319,6 +319,16 @@ impl Ctx {
         self.remote(move |tv| tv.send_key(&key));
     }
 
+    /// A Remote page key: while something casts, the media keys and ← → control the
+    /// cast (play/pause, stop, ±10 s) instead of being sent; otherwise a plain click.
+    /// Runs on the remote worker since a cast started elsewhere may need a SOAP round
+    /// trip ([`tvremote_core::Tv::media_key`]: only for the media keys; ← → only use
+    /// the renderer state seen in the last few seconds, which the Remote page's
+    /// now-playing bar keeps fresh while it is shown, so menu navigation never waits).
+    pub fn media_key(&self, key: tvremote_core::Key) {
+        self.remote(move |tv| tv.media_key(&key).map(|_| ()));
+    }
+
     /// Run `f` now if VAAPI is known, and every time it becomes known.
     pub fn on_vaapi(&self, f: impl Fn(bool) + 'static) {
         if let Some(v) = self.vaapi.get() {

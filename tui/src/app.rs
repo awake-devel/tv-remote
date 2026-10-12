@@ -5,12 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::{Position, Rect};
 use ratatui::widgets::ListState;
 
-use tvremote_core::cast::{CastEvent, CastRequest, CastSession, CompatReport, MediaInfo};
+use tvremote_core::cast::{CastEvent, CastRequest, CastSession, CastStatus, CompatReport, MediaInfo};
 use tvremote_core::netcheck::{CapacityProgress, FixKind};
 use tvremote_core::fleet::Candidate;
 use tvremote_core::{
@@ -129,6 +130,13 @@ pub struct App {
     pub volume: Option<u8>,
     pub muted: Option<bool>,
     pub session: Option<CastSession>,
+    /// A cast started elsewhere, as the current TV's renderer last reported it (polled
+    /// every few seconds while nothing is cast from here).
+    pub renderer: Option<CastStatus>,
+    renderer_polled: Option<Instant>,
+    /// Where the now-playing progress bar was drawn (clicks seek there); `None` when
+    /// it is hidden or the cast is not seekable.
+    pub seek_bar: Option<Rect>,
     pub log: VecDeque<(Instant, Level, String)>,
 
     // apps
@@ -185,6 +193,9 @@ impl App {
             volume: None,
             muted: None,
             session: None,
+            renderer: None,
+            renderer_polled: None,
+            seek_bar: None,
             log: VecDeque::new(),
             apps: Vec::new(),
             apps_loading: false,
@@ -247,6 +258,63 @@ impl App {
         self.session.as_ref().is_some_and(|s| !s.is_finished())
     }
 
+    /// What is casting: the session from here, else a cast started elsewhere on the
+    /// current TV.
+    pub fn playing(&self) -> Option<CastStatus> {
+        match &self.session {
+            Some(s) if !s.is_finished() => Some(s.status()),
+            _ => self.renderer.clone(),
+        }
+    }
+
+    /// While something seekable casts, ← → < > seek and 0-9 jump (mpv-style).
+    fn can_seek(&self) -> bool {
+        self.playing().is_some_and(|s| s.seekable)
+    }
+
+    /// Seek ± 10 s while a seekable cast plays, else send `key` (← → keep moving
+    /// through the TV's menus).
+    fn seek_or_key(&mut self, forward: bool, key: Key) {
+        if self.can_seek() {
+            self.workers.cmd(Cmd::Seek {
+                session: self.session.clone(),
+                forward,
+                key,
+            });
+        } else {
+            self.key(key);
+        }
+    }
+
+    /// `key`: the digit to send instead if the cast turns out to be gone.
+    fn seek_fraction(&mut self, fraction: f64, key: Option<Key>) {
+        self.workers.cmd(Cmd::SeekFraction {
+            session: self.session.clone(),
+            fraction,
+            key,
+        });
+    }
+
+    /// Poll the renderer every few seconds while nothing is cast from here, so casts
+    /// started elsewhere show up (and can be controlled); not while the TV is known off.
+    fn maybe_poll_renderer(&mut self) {
+        const EVERY: Duration = Duration::from_secs(3);
+        if self.is_casting() {
+            self.renderer = None;
+            return;
+        }
+        let off = matches!(self.power, Some(PowerState::Off | PowerState::Standby));
+        if off {
+            self.renderer = None;
+            return;
+        }
+        if self.host.trim().is_empty() || self.renderer_polled.is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        self.renderer_polled = Some(Instant::now());
+        self.workers.poll_renderer();
+    }
+
     // ------------------------------------------------------------------ background
 
     /// Drain worker messages and core events (called every tick).
@@ -260,6 +328,7 @@ impl App {
         if self.session.as_ref().is_some_and(|s| s.is_finished()) {
             self.session = None;
         }
+        self.maybe_poll_renderer();
     }
 
     fn on_event(&mut self, te: TvEvent) {
@@ -498,6 +567,11 @@ impl App {
                     self.scan_new.len()
                 ));
             }
+            Msg::Renderer(st) => {
+                if !self.is_casting() {
+                    self.renderer = st;
+                }
+            }
             Msg::PowerDone { on, result } => match result {
                 Ok(()) => self.info(if on {
                     "The TV is on"
@@ -583,6 +657,23 @@ impl App {
         }
     }
 
+    /// A click on the now-playing progress bar seeks to that point (any screen, no
+    /// popup open).
+    pub fn on_mouse(&mut self, m: MouseEvent) {
+        if m.kind != MouseEventKind::Down(MouseButton::Left)
+            || self.overlay != Overlay::None
+            || self.net_test.is_some()
+        {
+            return;
+        }
+        let Some(bar) = self.seek_bar.filter(|r| r.contains(Position::new(m.column, m.row))) else {
+            return;
+        };
+        if self.can_seek() {
+            self.seek_fraction(crate::util::column_fraction(m.column, bar.x, bar.width), None);
+        }
+    }
+
     fn request_quit(&mut self) {
         // Stop the network test first so the TV does not keep showing the test pattern;
         // asking again quits at once.
@@ -651,8 +742,8 @@ impl App {
             KeyCode::Char('q') | KeyCode::Esc => self.request_quit(),
             KeyCode::Up => self.key(Key::Up),
             KeyCode::Down => self.key(Key::Down),
-            KeyCode::Left => self.key(Key::Left),
-            KeyCode::Right => self.key(Key::Right),
+            KeyCode::Left => self.seek_or_key(false, Key::Left),
+            KeyCode::Right => self.seek_or_key(true, Key::Right),
             KeyCode::Enter => self.key(Key::Enter),
             KeyCode::Backspace => self.key(Key::Return),
             KeyCode::PageUp => self.key(Key::ChannelUp),
@@ -666,10 +757,16 @@ impl App {
             KeyCode::Char('I') => self.key(Key::Info),
             KeyCode::Char('G') => self.key(Key::Guide),
             KeyCode::Char('x') => self.key(Key::Exit),
-            KeyCode::Char('<') => self.key(Key::Rewind),
-            KeyCode::Char('>') => self.key(Key::FastForward),
+            KeyCode::Char('<') => self.seek_or_key(false, Key::Rewind),
+            KeyCode::Char('>') => self.seek_or_key(true, Key::FastForward),
             KeyCode::F(n @ 2..=5) => {
                 self.key([Key::Red, Key::Green, Key::Yellow, Key::Blue][(n - 2) as usize].clone())
+            }
+            // mpv-style: 0-9 jump to 0 %-90 % while a seekable cast plays (a TV number
+            // key would leave the player anyway); TV number keys otherwise.
+            KeyCode::Char(c @ '0'..='9') if self.can_seek() => {
+                let d = c as u8 - b'0';
+                self.seek_fraction(f64::from(d) / 10.0, Key::digit(d))
             }
             KeyCode::Char(c @ '0'..='9') => {
                 if let Some(key) = Key::digit(c as u8 - b'0') {
@@ -775,6 +872,8 @@ impl App {
         }
         self.workers.set_tv(tv.clone());
         self.tv = tv;
+        self.renderer = None;
+        self.renderer_polled = None;
         self.host = self.tv.host();
         self.conn = self.tv.connection_state();
         self.power = self.tv_power.get(id).cloned();
