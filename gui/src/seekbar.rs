@@ -21,8 +21,9 @@ use tvremote_core::SEEK_STEP;
 
 use crate::format::{fmt_duration, x_to_fraction};
 
-/// How long position updates are ignored after a seek is sent (until it is done).
-const HOLD_SENDING: Duration = Duration::from_secs(4);
+/// How long position updates are ignored after a seek is sent (until it is done; a
+/// TV-friendly cast may need a few seconds to restart its stream there).
+const HOLD_SENDING: Duration = Duration::from_secs(15);
 /// … and once the TV accepted it, while it settles on the new position.
 const HOLD_SETTLE: Duration = Duration::from_millis(1500);
 

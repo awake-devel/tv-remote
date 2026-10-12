@@ -2,10 +2,13 @@
 //!
 //! * [`ServeSource::File`]: one local file with `Range`/206 support so the TV can seek
 //!   (port of tv-cast's `RangeHandler`: HTTP/1.0, 1 MiB writes, DLNA headers).
-//! * [`ServeSource::Command`]: a live stream from a child process' stdout (ffmpeg),
-//!   sent with chunked transfer encoding. Every GET starts a fresh process (the
-//!   previous one is killed), so the TV's probe request and its real request both
-//!   get the stream from the start. Not seekable.
+//! * [`ServeSource::Command`]: a stream from a child process' stdout (ffmpeg), sent
+//!   with chunked transfer encoding. Every GET starts a fresh process (the previous one
+//!   is killed and reaped first), so the TV's probe request and its real request both
+//!   get a whole stream. Seekable by time, the DLNA way: a request with
+//!   `TimeSeekRange.dlna.org: npt=<start>-` starts the process `start` into the media
+//!   (answered with the range served), and a `?t=<secs>` query (the app's own restart,
+//!   see `CastSession::seek`) shifts the whole stream: see [`stream_start`].
 //!
 //! Every byte sent is counted; a sampler thread records bytes/s once per second
 //! (see [`FileServer::samples`]), which feeds the cast throughput graph and the
@@ -27,8 +30,9 @@ use crate::error::{Error, Result};
 
 /// `contentFeatures.dlna.org` for seekable files (as in tv-cast).
 pub const DLNA_FEATURES_FILE: &str = "DLNA.ORG_OP=01;DLNA.ORG_CI=0";
-/// `contentFeatures.dlna.org` for live, transcoded, non-seekable streams.
-pub const DLNA_FEATURES_STREAM: &str = "DLNA.ORG_OP=00;DLNA.ORG_CI=1";
+/// `contentFeatures.dlna.org` for transcoded streams: time seek, HTTP stalling (see
+/// [`crate::dlna::DLNA_FLAGS_STREAM`]).
+pub const DLNA_FEATURES_STREAM: &str = crate::dlna::DLNA_FLAGS_STREAM;
 
 /// MIME type for a media path (tv-cast's table plus common extras; default `video/mp4`).
 pub fn mime_for_path(path: &Path) -> &'static str {
@@ -168,25 +172,136 @@ pub fn parse_range(header: Option<&str>, size: u64) -> RangeSpec {
     }
 }
 
-/// Creates the child process for a live stream. Its stdout must be piped.
-pub type StreamFactory = Arc<dyn Fn() -> Result<Child> + Send + Sync>;
+/// Where a stream process starts ([`StreamFactory`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamStart {
+    /// Position in the media to start from.
+    pub at: Duration,
+    /// Make the output timestamps start here (`-output_ts_offset`): the `npt` start the
+    /// TV asked for, in its own timeline. `None`: they start at 0.
+    pub ts_offset: Option<Duration>,
+}
+
+/// Creates the child process for a stream starting at the given point. Its stdout
+/// must be piped.
+pub type StreamFactory = Arc<dyn Fn(StreamStart) -> Result<Child> + Send + Sync>;
 
 /// What the server serves.
 #[derive(Clone)]
 pub enum ServeSource {
     /// A local file, seekable via Range.
     File(PathBuf),
-    /// A live stream from a child process' stdout (one process per GET).
-    Command(StreamFactory),
+    /// A stream from a child process' stdout (one process per GET), seekable by time.
+    Command {
+        /// Starts the process.
+        factory: StreamFactory,
+        /// Length of the whole media, if known (for `TimeSeekRange` answers).
+        length: Option<Duration>,
+    },
 }
 
 impl std::fmt::Debug for ServeSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ServeSource::File(p) => f.debug_tuple("File").field(p).finish(),
-            ServeSource::Command(_) => f.write_str("Command(..)"),
+            ServeSource::Command { length, .. } => f.debug_struct("Command").field("length", length).finish(),
         }
     }
+}
+
+/// Parse one npt time: seconds (`90`, `90.5`) or `H:MM:SS[.fff]`. Pure.
+fn parse_npt_time(s: &str) -> Option<Duration> {
+    let s = s.trim();
+    let plain = |p: &str, frac: bool| {
+        !p.is_empty()
+            && p.chars().all(|c| c.is_ascii_digit() || (frac && c == '.'))
+            && p.matches('.').count() <= 1
+            && p.chars().any(|c| c.is_ascii_digit())
+    };
+    let parts: Vec<&str> = s.split(':').collect();
+    let secs = match parts.as_slice() {
+        [sec] if plain(sec, true) => sec.parse::<f64>().ok()?,
+        [h, m, sec] if plain(h, false) && plain(m, false) && plain(sec, true) => {
+            let (h, m, sec): (f64, f64, f64) = (h.parse().ok()?, m.parse().ok()?, sec.parse().ok()?);
+            if m >= 60.0 || sec >= 60.0 {
+                return None;
+            }
+            h * 3600.0 + m * 60.0 + sec
+        }
+        _ => return None,
+    };
+    Some(Duration::from_secs_f64(secs))
+}
+
+/// Parse a `TimeSeekRange.dlna.org` request value, `npt=<start>-[<end>]` (times in
+/// seconds or `H:MM:SS[.fff]`); `None` if malformed (e.g. `npt=now-`). Pure.
+pub fn parse_time_seek(value: &str) -> Option<(Duration, Option<Duration>)> {
+    let v = value.trim();
+    let spec = v.get(..4).filter(|p| p.eq_ignore_ascii_case("npt="))?;
+    let (a, b) = v[spec.len()..].split_once('-')?;
+    let start = parse_npt_time(a)?;
+    let end = if b.trim().is_empty() { None } else { Some(parse_npt_time(b)?) };
+    if end.is_some_and(|e| e < start) {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// `H:MM:SS.mmm`, as npt times are written in answers. Pure.
+pub fn format_npt(d: Duration) -> String {
+    let ms = d.as_millis();
+    format!("{}:{:02}:{:02}.{:03}", ms / 3_600_000, (ms / 60_000) % 60, (ms / 1000) % 60, ms % 1000)
+}
+
+/// The `TimeSeekRange.dlna.org` answer: `npt=<start>-<end>/<length>`, with `end` =
+/// the length (the stream runs to the end) and `*` for an unknown length. Pure.
+pub fn time_seek_response(start: Duration, length: Option<Duration>) -> String {
+    match length {
+        Some(l) => format!("npt={}-{}/{}", format_npt(start), format_npt(l), format_npt(l)),
+        None => format!("npt={}-/*", format_npt(start)),
+    }
+}
+
+/// The shortest end of a stream worth starting. Measured on the 2025 TV: asked to seek
+/// to 4:59 of a 5:00 TV-friendly cast, it fetched `npt=295` (it rounds the target down,
+/// to whole seconds and a keyframe), sat TRANSITIONING on the 5 s tail and stopped
+/// answering DLNA; a TV that has to buffer before playing needs more than that. 10 s
+/// leaves room for its rounding (seen up to 4 s) plus a tail it can buffer.
+pub const MIN_STREAM_TAIL: Duration = Duration::from_secs(10);
+
+/// A time-seek start kept at least [`MIN_STREAM_TAIL`] before the end (`length`, on
+/// the TV's timeline; unknown: unchanged). Pure.
+pub fn keep_tail(npt: Duration, length: Option<Duration>) -> Duration {
+    match length.filter(|l| !l.is_zero()) {
+        Some(l) => npt.min(l.saturating_sub(MIN_STREAM_TAIL)),
+        None => npt,
+    }
+}
+
+/// Restart offset in a stream URL or request path: the `t=<secs>` query parameter
+/// (`/film.tv.mkv?t=90.5`), 0 when absent or malformed. Pure.
+pub fn start_offset(path_or_url: &str) -> Duration {
+    let Some((_, q)) = path_or_url.split_once('?') else { return Duration::ZERO };
+    q.split('&')
+        .filter_map(|kv| kv.strip_prefix("t="))
+        .find_map(|v| {
+            let ok = !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.') && v.matches('.').count() <= 1;
+            ok.then(|| v.parse::<f64>().ok()).flatten()
+        })
+        .map(Duration::from_secs_f64)
+        .unwrap_or_default()
+}
+
+/// Where a stream request starts, and the length the TV sees: `restart` (the `?t=`
+/// offset) shifts the TV's whole timeline, then `npt` (from `TimeSeekRange`) is a point
+/// on that timeline. Returns the process start and the TV-side length (`length` −
+/// `restart`). Pure.
+pub fn stream_start(restart: Duration, npt: Option<Duration>, length: Option<Duration>) -> (StreamStart, Option<Duration>) {
+    let start = StreamStart {
+        at: restart + npt.unwrap_or_default(),
+        ts_offset: npt,
+    };
+    (start, length.map(|l| l.saturating_sub(restart)))
 }
 
 /// One throughput sample.
@@ -218,32 +333,48 @@ struct Inner {
     started: Instant,
     first_byte: Mutex<Option<Instant>>,
     samples: Mutex<VecDeque<ThroughputSample>>,
-    child: Mutex<Option<(u64, Child)>>,
+    /// Stream processes still producing: (generation, started, process).
+    children: Mutex<Vec<(u64, Instant, Child)>>,
     generation: AtomicU64,
+    /// Generation of the last stream process that reached its end (ffmpeg done).
+    done_gen: AtomicU64,
+    /// Requests that carried `TimeSeekRange.dlna.org`.
+    time_seeks: AtomicU64,
+    /// The last of them: when, and where its stream starts in the media.
+    last_time_seek: Mutex<Option<(Instant, Duration)>>,
     log: Mutex<VecDeque<String>>,
+}
+
+fn reap(mut ch: Child) {
+    let _ = ch.kill();
+    let _ = ch.wait();
 }
 
 impl Inner {
     fn kill_child(&self) {
-        if let Ok(mut c) = self.child.lock() {
-            if let Some((_, mut ch)) = c.take() {
-                let _ = ch.kill();
-                let _ = ch.wait();
-            }
+        if let Ok(mut c) = self.children.lock() {
+            c.drain(..).for_each(|(_, _, ch)| reap(ch));
         }
     }
 
-    /// Kill the current child only if it is still generation `gen`.
+    /// Kill the stream process of generation `gen` (its connection is over).
     fn kill_generation(&self, gen: u64) {
-        if let Ok(mut c) = self.child.lock() {
-            if c.as_ref().is_some_and(|(g, _)| *g == gen) {
-                if let Some((_, mut ch)) = c.take() {
-                    let _ = ch.kill();
-                    let _ = ch.wait();
-                }
+        if let Ok(mut c) = self.children.lock() {
+            if let Some(i) = c.iter().position(|(g, _, _)| *g == gen) {
+                reap(c.remove(i).2);
             }
         }
     }
+}
+
+/// Requests that arrive this close together are siblings of one fetch (a TV often
+/// opens a probe connection next to the real one, in either order), so neither stops
+/// the other; an older stream is replaced by a new request (the TV moved on: a seek).
+pub const SIBLING_WINDOW: Duration = Duration::from_secs(2);
+
+/// Does a new request replace a stream process started `age` ago? Pure.
+pub fn supersedes(age: Duration) -> bool {
+    age >= SIBLING_WINDOW
 }
 
 /// A running media server. Stops when [`FileServer::stop`] is called or the last
@@ -300,8 +431,11 @@ impl FileServer {
             started: Instant::now(),
             first_byte: Mutex::new(None),
             samples: Mutex::new(VecDeque::new()),
-            child: Mutex::new(None),
+            children: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
+            done_gen: AtomicU64::new(0),
+            time_seeks: AtomicU64::new(0),
+            last_time_seek: Mutex::new(None),
             log: Mutex::new(VecDeque::new()),
         });
         let acc = inner.clone();
@@ -335,9 +469,28 @@ impl FileServer {
         &self.inner.mime
     }
 
-    /// True for a live (non-seekable) stream source.
+    /// True for a process stream source (TV-friendly).
     pub fn is_stream(&self) -> bool {
-        matches!(self.inner.source, ServeSource::Command(_))
+        matches!(self.inner.source, ServeSource::Command { .. })
+    }
+
+    /// Number of stream requests so far that carried `TimeSeekRange.dlna.org` (the TV
+    /// seeking natively).
+    pub fn time_seek_count(&self) -> u64 {
+        self.inner.time_seeks.load(Ordering::SeqCst)
+    }
+
+    /// The last `TimeSeekRange` fetch (from whoever sent the TV its `Seek`): when, and
+    /// where in the media its stream starts.
+    pub fn last_time_seek(&self) -> Option<(Instant, Duration)> {
+        self.inner.last_time_seek.lock().ok().and_then(|g| *g)
+    }
+
+    /// The newest stream process has produced everything (ffmpeg reached the end of
+    /// the media); false while one is running.
+    pub fn stream_done(&self) -> bool {
+        let g = self.inner.generation.load(Ordering::SeqCst);
+        g > 0 && self.inner.done_gen.load(Ordering::SeqCst) == g
     }
 
     /// Total bytes sent so far.
@@ -441,6 +594,7 @@ struct Request {
     method: String,
     path: String,
     range: Option<String>,
+    time_seek: Option<String>,
 }
 
 fn read_request(stream: &TcpStream) -> Result<Request> {
@@ -451,6 +605,7 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("/").to_string();
     let mut range = None;
+    let mut time_seek = None;
     let mut total = line.len();
     loop {
         let mut h = String::new();
@@ -462,6 +617,8 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
         if let Some((k, v)) = h.split_once(':') {
             if k.trim().eq_ignore_ascii_case("range") {
                 range = Some(v.trim().to_string());
+            } else if k.trim().eq_ignore_ascii_case("timeseekrange.dlna.org") {
+                time_seek = Some(v.trim().to_string());
             }
         }
     }
@@ -469,6 +626,7 @@ fn read_request(stream: &TcpStream) -> Result<Request> {
         method,
         path,
         range,
+        time_seek,
     })
 }
 
@@ -491,10 +649,11 @@ fn handle(mut stream: TcpStream, inner: &Inner) -> Result<()> {
     inner.requests.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut l) = inner.log.lock() {
         l.push_back(format!(
-            "{} {} {}",
+            "{} {} {} {}",
             req.method,
             req.path,
-            req.range.as_deref().unwrap_or("-")
+            req.range.as_deref().unwrap_or("-"),
+            req.time_seek.as_deref().map(|t| format!("TimeSeekRange {t}")).unwrap_or_default()
         ));
         while l.len() > 100 {
             l.pop_front();
@@ -510,7 +669,9 @@ fn handle(mut stream: TcpStream, inner: &Inner) -> Result<()> {
     };
     match &inner.source {
         ServeSource::File(p) => serve_file(&mut stream, inner, p, req.range.as_deref(), head_only),
-        ServeSource::Command(f) => serve_stream(&mut stream, inner, f, head_only),
+        ServeSource::Command { factory, length } => {
+            serve_stream(&mut stream, inner, factory, *length, &req, head_only)
+        }
     }
 }
 
@@ -571,11 +732,33 @@ fn serve_stream(
     stream: &mut TcpStream,
     inner: &Inner,
     factory: &StreamFactory,
+    length: Option<Duration>,
+    req: &Request,
     head_only: bool,
 ) -> Result<()> {
+    let restart = start_offset(&req.path);
+    let tv_length = length.map(|l| l.saturating_sub(restart));
+    // Never serve a tail of a few seconds: the TV can't start one (see `MIN_STREAM_TAIL`).
+    let npt = req
+        .time_seek
+        .as_deref()
+        .and_then(parse_time_seek)
+        .map(|(s, _)| keep_tail(s, tv_length));
+    let (start, tv_length) = stream_start(restart, npt, length);
+    // Only a GET fetches the new point (a HEAD is a probe).
+    if npt.is_some() && !head_only {
+        inner.time_seeks.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut l) = inner.last_time_seek.lock() {
+            *l = Some((Instant::now(), start.at));
+        }
+    }
+    // DLNA answers a time seek with 200 and the range served (as minidlna does).
+    let seek_line = npt
+        .map(|n| format!("TimeSeekRange.dlna.org: {}\r\n", time_seek_response(n, tv_length)))
+        .unwrap_or_default();
     let h = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nTransfer-Encoding: chunked\r\nAccept-Ranges: none\r\n\
-         transferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: {DLNA_FEATURES_STREAM}\r\n\
+         {seek_line}transferMode.dlna.org: Streaming\r\ncontentFeatures.dlna.org: {DLNA_FEATURES_STREAM}\r\n\
          Connection: close\r\n\r\n",
         inner.mime
     );
@@ -585,18 +768,38 @@ fn serve_stream(
         stream.write_all(h.as_bytes())?;
         return Ok(());
     }
-    // One producer at a time: kill the previous one.
-    inner.kill_child();
-    let mut child = factory()?;
-    let mut out = child
-        .stdout
-        .take()
-        .ok_or_else(|| Error::Media("stream process has no stdout".into()))?;
-    let gen = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    if let Ok(mut c) = inner.child.lock() {
-        *c = Some((gen, child));
+    // Replace older producers (the TV moved on), but not a sibling started moments ago:
+    // killing the connection the TV is about to play from leaves it waiting forever on
+    // the other one, which it never reads (see `SIBLING_WINDOW`). Done under one lock,
+    // so racing requests can never leave an orphan process behind; a sibling the TV
+    // drops ends with its connection (or the next seek).
+    let (gen, mut out) = {
+        let mut kids = inner.children.lock().map_err(|_| Error::Media("stream state poisoned".into()))?;
+        let now = Instant::now();
+        let (old, keep): (Vec<_>, Vec<_>) = kids.drain(..).partition(|(_, t, _)| supersedes(now - *t));
+        *kids = keep;
+        old.into_iter().for_each(|(_, _, ch)| reap(ch));
+        let mut child = factory(start)?;
+        let out = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Media("stream process has no stdout".into()));
+        let out = match out {
+            Ok(o) => o,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e);
+            }
+        };
+        let gen = inner.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        kids.push((gen, now, child));
+        (gen, out)
+    };
+    if let Err(e) = stream.write_all(h.as_bytes()) {
+        inner.kill_generation(gen);
+        return Err(e.into());
     }
-    stream.write_all(h.as_bytes())?;
     let mut buf = vec![0u8; 256 * 1024];
     loop {
         if inner.stop.load(Ordering::Relaxed) {
@@ -604,6 +807,9 @@ fn serve_stream(
         }
         let n = match out.read(&mut buf) {
             Ok(0) => {
+                // The end of the media (not a kill: that ends the read too, but a newer
+                // generation exists by then, so `stream_done` stays false).
+                inner.done_gen.store(gen, Ordering::SeqCst);
                 let _ = stream.write_all(b"0\r\n\r\n");
                 break;
             }
@@ -700,7 +906,10 @@ mod tests {
 
     #[test]
     fn serves_chunked_stream_on_localhost() {
-        let factory: StreamFactory = Arc::new(|| {
+        let starts: Arc<Mutex<Vec<StreamStart>>> = Arc::default();
+        let seen = starts.clone();
+        let factory: StreamFactory = Arc::new(move |start| {
+            seen.lock().unwrap().push(start);
             std::process::Command::new("printf")
                 .arg("hello stream")
                 .stdout(std::process::Stdio::piped())
@@ -708,15 +917,150 @@ mod tests {
                 .map_err(Error::from)
         });
         let srv = FileServer::start(
-            ServeSource::Command(factory),
+            ServeSource::Command { factory, length: Some(Duration::from_secs(300)) },
             "video/x-mkv",
-            "live.mkv",
+            "live.tv.mkv",
             IpAddr::V4(Ipv4Addr::LOCALHOST),
         )
         .unwrap();
         let (h, b) = get(srv.port(), "");
         assert!(h.contains("Transfer-Encoding: chunked"));
+        assert!(h.contains("contentFeatures.dlna.org: DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=0170"));
+        assert!(!h.contains("TimeSeekRange"));
         let body = String::from_utf8(b).unwrap();
         assert_eq!(body, "C\r\nhello stream\r\n0\r\n\r\n");
+        // The TV seeks natively.
+        let (h, _) = get(srv.port(), "TimeSeekRange.dlna.org: npt=60.5-\r\n");
+        assert!(h.starts_with("HTTP/1.1 200"));
+        assert!(h.contains("TimeSeekRange.dlna.org: npt=0:01:00.500-0:05:00.000/0:05:00.000\r\n"), "{h}");
+        assert_eq!(srv.time_seek_count(), 1);
+        // Near (or past) the end: served from 10 s before it, and the answer says so.
+        let (h, _) = get(srv.port(), "TimeSeekRange.dlna.org: npt=295-\r\n");
+        assert!(h.starts_with("HTTP/1.1 200"));
+        assert!(h.contains("TimeSeekRange.dlna.org: npt=0:04:50.000-0:05:00.000/0:05:00.000\r\n"), "{h}");
+        let (h, _) = get(srv.port(), "TimeSeekRange.dlna.org: npt=0:06:00-\r\n");
+        assert!(h.contains("npt=0:04:50.000-"), "{h}");
+        let s = starts.lock().unwrap().clone();
+        assert_eq!(s[0], StreamStart::default());
+        assert_eq!(s[1], StreamStart { at: Duration::from_millis(60_500), ts_offset: Some(Duration::from_millis(60_500)) });
+        assert_eq!(s[2], StreamStart { at: Duration::from_secs(290), ts_offset: Some(Duration::from_secs(290)) });
+        assert_eq!(s.len(), 4);
+        assert!(srv.stream_done(), "printf reached its end");
+    }
+
+    #[test]
+    fn a_new_request_replaces_the_previous_stream_process() {
+        // A long-running fake ffmpeg: says hello, then waits.
+        let factory: StreamFactory = Arc::new(|_| {
+            std::process::Command::new("sh")
+                .args(["-c", "printf hello; exec sleep 30"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .map_err(Error::from)
+        });
+        let srv = FileServer::start(
+            ServeSource::Command { factory, length: None },
+            "video/x-mkv",
+            "x.tv.mkv",
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+        let open = |extra: &str| {
+            let mut s = TcpStream::connect(("127.0.0.1", srv.port())).unwrap();
+            write!(s, "GET /x.tv.mkv HTTP/1.1\r\nHost: x\r\n{extra}\r\n").unwrap();
+            s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 512];
+            while !got.windows(5).any(|w| w == b"hello") {
+                let n = s.read(&mut buf).unwrap();
+                assert!(n > 0, "stream ended early");
+                got.extend_from_slice(&buf[..n]);
+            }
+            s
+        };
+        // Still streaming: nothing more but the rest of the first chunk, no end chunk.
+        let streaming = |s: &mut TcpStream| {
+            s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let mut got = Vec::new();
+            let mut b = [0u8; 64];
+            loop {
+                match s.read(&mut b) {
+                    Ok(0) => return false,
+                    Ok(n) => got.extend_from_slice(&b[..n]),
+                    Err(_) => return !got.windows(5).any(|w| w == b"0\r\n\r\n"),
+                }
+            }
+        };
+        let mut first = open("");
+        // A sibling request right after (the TV's probe + real fetch): both stay up.
+        let mut sibling = open("");
+        assert!(streaming(&mut sibling));
+        assert!(streaming(&mut first), "the sibling did not stop the first");
+        // A later request (a seek) replaces both.
+        std::thread::sleep(SIBLING_WINDOW + Duration::from_millis(100));
+        let t0 = Instant::now();
+        let _seek = open("TimeSeekRange.dlna.org: npt=10-\r\n");
+        for mut old in [first, sibling] {
+            old.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let mut rest = Vec::new();
+            old.read_to_end(&mut rest).unwrap();
+            assert!(rest.ends_with(b"0\r\n\r\n"), "{:?}", String::from_utf8_lossy(&rest));
+        }
+        assert!(t0.elapsed() < Duration::from_secs(5), "not after the 30 s sleep");
+        assert!(srv.last_time_seek().is_some_and(|(_, at)| at == Duration::from_secs(10)));
+        assert!(!srv.stream_done(), "killed, not finished");
+        srv.stop();
+    }
+
+    #[test]
+    fn stream_tails_are_never_tiny() {
+        let s = Duration::from_secs;
+        assert_eq!(keep_tail(s(295), Some(s(300))), s(290), "seen live: npt=295 of 5:00");
+        assert_eq!(keep_tail(s(290), Some(s(300))), s(290));
+        assert_eq!(keep_tail(s(120), Some(s(300))), s(120));
+        assert_eq!(keep_tail(s(400), Some(s(300))), s(290), "past the end");
+        assert_eq!(keep_tail(s(5), Some(s(8))), s(0), "a media shorter than the tail");
+        assert_eq!(keep_tail(s(295), None), s(295), "unknown length");
+        // After an app restart at 4:00 the TV's timeline is 60 s long.
+        assert_eq!(keep_tail(s(58), Some(s(60))), s(50));
+    }
+
+    #[test]
+    fn sibling_requests() {
+        assert!(!supersedes(Duration::from_millis(30)), "probe + real fetch");
+        assert!(!supersedes(SIBLING_WINDOW - Duration::from_millis(1)));
+        assert!(supersedes(SIBLING_WINDOW));
+        assert!(supersedes(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn time_seek_headers() {
+        let s = Duration::from_secs;
+        assert_eq!(parse_time_seek("npt=10-"), Some((s(10), None)));
+        assert_eq!(parse_time_seek("NPT=10.5-20"), Some((Duration::from_millis(10_500), Some(s(20)))));
+        assert_eq!(parse_time_seek("npt=0:01:30.250-"), Some((Duration::from_millis(90_250), None)));
+        assert_eq!(parse_time_seek(" npt=00:00:05-00:01:00 "), Some((s(5), Some(s(60)))));
+        for bad in ["npt=now-", "npt=-10", "bytes=0-", "npt=10", "npt=20-10", "npt=1e2-", "npt=0:61:00-", "npt=inf-", ""] {
+            assert_eq!(parse_time_seek(bad), None, "{bad}");
+        }
+        assert_eq!(format_npt(Duration::from_millis(3_723_045)), "1:02:03.045");
+        assert_eq!(time_seek_response(s(60), Some(s(300))), "npt=0:01:00.000-0:05:00.000/0:05:00.000");
+        assert_eq!(time_seek_response(s(60), None), "npt=0:01:00.000-/*");
+    }
+
+    #[test]
+    fn restart_offsets() {
+        let s = Duration::from_secs;
+        assert_eq!(start_offset("/film.tv.mkv?t=90.5"), Duration::from_millis(90_500));
+        assert_eq!(start_offset("http://192.0.2.1:1/a%20b.tv.mkv?x=1&t=60"), s(60));
+        assert_eq!(start_offset("/film.tv.mkv"), Duration::ZERO);
+        assert_eq!(start_offset("/f?t=-5"), Duration::ZERO);
+        assert_eq!(start_offset("/f?t=nan"), Duration::ZERO);
+        // Restarted at 60 s, then the TV seeks natively to 30 s of its own timeline.
+        let (st, tv_len) = stream_start(s(60), Some(s(30)), Some(s(300)));
+        assert_eq!(st, StreamStart { at: s(90), ts_offset: Some(s(30)) });
+        assert_eq!(tv_len, Some(s(240)));
+        let (st, _) = stream_start(s(60), None, None);
+        assert_eq!(st, StreamStart { at: s(60), ts_offset: None });
     }
 }

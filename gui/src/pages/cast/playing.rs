@@ -1,5 +1,6 @@
-//! Now-playing card: title, state, a VLC-like seek bar (greyed out for live streams),
-//! play/pause/stop and a throughput sparkline. Driven by `Event::Cast`.
+//! Now-playing card: title, state, a VLC-like seek bar (direct and TV-friendly casts
+//! alike; greyed out only for a live URL), play/pause/stop and a throughput sparkline.
+//! Driven by `Event::Cast`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -23,7 +24,6 @@ pub struct NowPlaying {
     ctx: Weak<Ctx>,
     title_row: adw::ActionRow,
     bar: Rc<SeekBar>,
-    seek_note: gtk::Label,
     play_btn: gtk::Button,
     stop_btn: gtk::Button,
     spark: gtk::DrawingArea,
@@ -32,14 +32,10 @@ pub struct NowPlaying {
     session: RefCell<Option<CastSession>>,
     seekable: Cell<bool>,
     playing: Cell<bool>,
-    /// A TV-friendly (live) stream: the TV refuses Pause and Seek.
-    live: Cell<bool>,
 }
 
-/// Tooltip of the greyed-out seek bar.
-pub const NO_SEEK_LIVE: &str = "This cast is a live stream (TV-friendly mode): seeking is not possible";
-/// Tooltip of the greyed-out pause button.
-pub const NO_PAUSE_LIVE: &str = "This cast is a live stream (TV-friendly mode): pausing is not possible";
+/// Tooltip of the greyed-out seek bar (a live URL: the TV reports no length).
+pub const NO_SEEK_LIVE: &str = "This cast is a live stream (the TV reports no length): seeking is not possible";
 
 pub fn state_text(s: &TransportState) -> &'static str {
     match s {
@@ -67,12 +63,6 @@ impl NowPlaying {
 
         let bar = SeekBar::new();
         body.append(&bar.widget);
-        let seek_note = gtk::Label::new(Some("TV-friendly streams are live: seeking is not possible."));
-        seek_note.add_css_class("caption");
-        seek_note.add_css_class("dim-label");
-        seek_note.set_xalign(0.0);
-        seek_note.set_visible(false);
-        body.append(&seek_note);
 
         let controls = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         controls.set_halign(gtk::Align::Center);
@@ -156,7 +146,6 @@ impl NowPlaying {
             ctx: ctx.weak(),
             title_row,
             bar,
-            seek_note,
             play_btn,
             stop_btn,
             spark,
@@ -165,7 +154,6 @@ impl NowPlaying {
             session: RefCell::new(None),
             seekable: Cell::new(false),
             playing: Cell::new(false),
-            live: Cell::new(false),
         });
         this.set_active(false);
 
@@ -228,8 +216,7 @@ impl NowPlaying {
     }
 
     fn set_active(&self, active: bool) {
-        self.play_btn.set_sensitive(active && !self.live.get());
-        self.play_btn.set_tooltip_text(Some(if self.live.get() { NO_PAUSE_LIVE } else { "Pause / resume" }));
+        self.play_btn.set_sensitive(active);
         self.stop_btn.set_sensitive(active);
         self.bar.set_seekable(active && self.seekable.get(), NO_SEEK_LIVE);
     }
@@ -261,8 +248,6 @@ impl NowPlaying {
     fn apply_status(&self, st: &CastStatus) {
         self.title_row.set_title(&glib::markup_escape_text(&st.title));
         self.seekable.set(st.seekable);
-        self.live.set(st.tv_friendly);
-        self.seek_note.set_visible(st.tv_friendly);
         if let Some(s) = &st.state {
             self.set_state(s);
         }
@@ -327,6 +312,8 @@ impl NowPlaying {
             CastEvent::NeverStarted => self.finish("The TV never started playing"),
             CastEvent::Stopped => self.finish("Stopped"),
             CastEvent::Stall { .. } | CastEvent::Error(_) => {}
+            // Which seek / pause path a TV-friendly cast took: for testing from a terminal.
+            CastEvent::Note(n) => eprintln!("Cast: {n}"),
         }
     }
 }

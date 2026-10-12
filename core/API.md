@@ -176,7 +176,8 @@ let session = tv.cast(CastRequest { source: CastSource::File(path), mode, title:
 // or CastRequest::file(path) / CastRequest::url(url)
 session.status();          // CastStatus { state, position, duration, seekable, tv_friendly, started, outcome, last_mbps, .. }
 session.throughput();      // Vec<ThroughputSample { t_secs, bytes_per_sec }> for the graph (.mbps())
-session.pause()?; session.resume()?; session.seek(dur)?;   // seek → Error::Unsupported in TV-friendly mode
+session.pause()?; session.resume()?; session.seek(dur)?;   // TV-friendly too: the TV's time seek, else the stream restarts there
+// (CastEvent::Note says which); pause: the TV's, else the app stops the TV and resume restarts
 session.play_pause()?;     // → new TransportState
 session.seek_relative(SEEK_STEP, true)?; session.seek_fraction(0.5)?;   // → target (clamped; quick repeats add up)
 session.stop()?;

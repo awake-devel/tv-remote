@@ -274,7 +274,7 @@ pub struct ProfileArgs {
     /// Re-encode the video to this bitrate with VAAPI; implies TV-friendly.
     #[arg(long, value_name = "MBPS")]
     pub reduce: Option<f64>,
-    /// TV-friendly mode (ffmpeg: one audio track, DTS → AC3; no seeking).
+    /// TV-friendly mode (ffmpeg: one audio track, DTS → AC3; converted on the fly).
     #[arg(long)]
     pub friendly: bool,
     /// Skip the packet analysis (use the cached one or a provisional estimate).
@@ -1396,7 +1396,7 @@ pub fn profile_flags(p: &CastProfile) -> String {
 
 fn describe_mode(info: &MediaInfo, mode: &CastMode) -> String {
     match mode {
-        CastMode::Direct => "direct (file as-is, all tracks, seekable)".into(),
+        CastMode::Direct => "direct (file as-is, all tracks)".into(),
         CastMode::TvFriendly(p) => {
             let audio = p
                 .audio
@@ -1714,6 +1714,13 @@ fn cmd_cast(tv: &Tv, a: CastArgs) -> CliResult {
                     eprintln!();
                 }
                 eprintln!("warning: {e}");
+            }
+            // Which seek / pause path a TV-friendly cast took (seek from the TUI or GUI).
+            Ok(Event::Cast(CastEvent::Note(n))) => {
+                if tty {
+                    eprintln!();
+                }
+                eprintln!("note: {n}");
             }
             Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(Duration::from_millis(250)),

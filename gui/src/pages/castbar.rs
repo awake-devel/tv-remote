@@ -18,14 +18,12 @@ use tvremote_core::dlna::TransportState;
 use tvremote_core::{CastEvent, CastStatus, Event, PowerState};
 
 use crate::ctx::Ctx;
-use crate::pages::cast::playing::{state_text, NO_PAUSE_LIVE, NO_SEEK_LIVE};
+use crate::pages::cast::playing::{state_text, NO_SEEK_LIVE};
 use crate::seekbar::SeekBar;
 
 /// Poll interval while the Remote page is shown.
 const POLL: Duration = Duration::from_secs(3);
 
-/// Tooltip of the greyed-out seek bar for a live cast started elsewhere.
-const NO_SEEK_ELSEWHERE: &str = "This cast is a live stream (the TV reports no length): seeking is not possible";
 
 pub struct CastBar {
     pub widget: gtk::Revealer,
@@ -231,17 +229,8 @@ impl CastBar {
         self.title.set_text(&st.title);
         self.title.set_tooltip_text(Some(&st.title));
         // At the start of a cast the TV buffers with no length yet: loading, not live.
-        let reason = if st.tv_friendly {
-            NO_SEEK_LIVE
-        } else if st.is_loading() {
-            "Loading on the TV…"
-        } else {
-            NO_SEEK_ELSEWHERE
-        };
+        let reason = if st.is_loading() { "Loading on the TV…" } else { NO_SEEK_LIVE };
         self.bar.set_seekable(st.seekable, reason);
-        // The TV refuses Pause on a live (TV-friendly) stream.
-        self.play_btn.set_sensitive(!st.tv_friendly);
-        self.play_btn.set_tooltip_text(Some(if st.tv_friendly { NO_PAUSE_LIVE } else { "Pause / resume the cast" }));
         self.bar.set_position(st.position, st.duration);
         self.loading.set(st.is_loading());
         self.set_state(&st.state.unwrap_or(TransportState::Transitioning));

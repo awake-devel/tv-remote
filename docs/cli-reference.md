@@ -80,13 +80,13 @@ Common keys:
 | `play` | resume a paused cast; with nothing loaded or a stopped cast, fails with "nothing is casting" | `tv-remote-tui play` |
 | `toggle` | pause when playing, resume when paused | `tv-remote-tui toggle` |
 | `stop` | stop the cast | `tv-remote-tui stop` |
-| `seek <POSITION>` | seek to `HH:MM:SS`, `MM:SS` or seconds; `+SECS` / `-SECS` (or `+M:SS`) from the current position; or a percentage like `50%`. A target at or past the end goes to 1 second before it. Prints the position it went to. Not possible in TV-friendly (live) casts | `tv-remote-tui seek 1:02:30`, `seek +10`, `seek -1:30`, `seek 50%` |
+| `seek <POSITION>` | seek to `HH:MM:SS`, `MM:SS` or seconds; `+SECS` / `-SECS` (or `+M:SS`) from the current position; or a percentage like `50%`. A target at or past the end goes to 1 second before it (10 seconds for a TV-friendly cast). Prints the position it went to. For a TV-friendly cast streamed by another process, only the TV's own seek is possible: see [Casting](casting.md#seeking-and-pausing-a-tv-friendly-cast) | `tv-remote-tui seek 1:02:30`, `seek +10`, `seek -1:30`, `seek 50%` |
 
 Options for `cast` and `netcheck`:
 
 | Option | What it does |
 |---|---|
-| `--friendly` | TV-friendly mode: one audio track, DTS → AC3, no seeking |
+| `--friendly` | TV-friendly mode: one audio track, DTS → AC3 (seeking restarts the conversion at the new point) |
 | `--audio <N>` | audio track to send (index from `netcheck`); implies TV-friendly |
 | `--sub <N>` | text subtitle track to keep (index from `netcheck`); implies TV-friendly |
 | `--reduce <MBPS>` | re-encode the video to this bitrate (1–80) with VAAPI; implies TV-friendly |

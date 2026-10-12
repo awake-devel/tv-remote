@@ -20,6 +20,28 @@ pub const CM: &str = "urn:schemas-upnp-org:service:ConnectionManager:1";
 /// DLNA flags used in DIDL `protocolInfo` (as in tv-cast).
 pub const DLNA_FLAGS: &str = "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
+/// `DLNA.ORG_FLAGS` primary bits (DLNA 1.5 guidelines, 7.4.1.3.24): streaming transfer
+/// mode.
+pub const FLAG_STREAMING_TRANSFER: u32 = 1 << 24;
+/// Background transfer mode.
+pub const FLAG_BACKGROUND_TRANSFER: u32 = 1 << 22;
+/// HTTP stalling: the server may stall the connection, so the renderer can pause a
+/// stream it can't byte-seek in.
+pub const FLAG_HTTP_STALLING: u32 = 1 << 21;
+/// DLNA 1.5 version flag.
+pub const FLAG_DLNA_V15: u32 = 1 << 20;
+
+/// The `DLNA.ORG_FLAGS` value: 8 hex digits of primary flags, then 24 reserved zeros. Pure.
+pub fn dlna_flags(primary: u32) -> String {
+    format!("{primary:08X}{}", "0".repeat(24))
+}
+
+/// Fourth `protocolInfo` field (and `contentFeatures.dlna.org`) of a TV-friendly stream:
+/// time seek only (`OP=10`, served with `TimeSeekRange.dlna.org`; no byte ranges),
+/// converted content (`CI=1`), streaming + background transfer, HTTP stalling (pause),
+/// DLNA 1.5: the same flags as files ([`DLNA_FLAGS`]).
+pub const DLNA_FLAGS_STREAM: &str = "DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000";
+
 /// Number of `Play` attempts while the transport is locked (×0.5 s).
 pub const PLAY_RETRIES: u32 = 20;
 
@@ -131,7 +153,7 @@ pub fn friendly(err: Error) -> Error {
         "the TV can't jump to that point (it is at or past the end)"
     } else if d.contains("transition not available") || d.contains("701") {
         match action.as_str() {
-            "Seek" => "the TV can't seek right now (a live stream, or it is still buffering)",
+            "Seek" => "the TV can't seek right now (it is still buffering, or this is a live stream)",
             "Pause" => "the TV can't pause right now (already paused or stopped?)",
             _ => "the TV can't do that right now: try again in a moment",
         }
@@ -166,6 +188,11 @@ pub fn upnp_class(mime: &str) -> &'static str {
 /// never sets it, and direct casts pass `None` to stay byte-identical with it. Live
 /// TV-friendly streams pass the source duration so the TV can show a progress bar.
 pub fn didl_metadata(uri: &str, title: &str, mime: &str, duration: Option<&str>) -> String {
+    didl_metadata_with(uri, title, mime, duration, DLNA_FLAGS)
+}
+
+/// [`didl_metadata`] with another fourth `protocolInfo` field (e.g. [`DLNA_FLAGS_STREAM`]).
+pub fn didl_metadata_with(uri: &str, title: &str, mime: &str, duration: Option<&str>, features: &str) -> String {
     let kind = upnp_class(mime);
     let dur = duration
         .map(|d| format!(" duration=\"{}\"", xml_escape(d)))
@@ -174,7 +201,7 @@ pub fn didl_metadata(uri: &str, title: &str, mime: &str, duration: Option<&str>)
         "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\" \
          xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\"><item id=\"0\" parentID=\"-1\" restricted=\"1\">\
          <dc:title>{}</dc:title><upnp:class>object.item.{kind}</upnp:class>\
-         <res protocolInfo=\"http-get:*:{mime}:{DLNA_FLAGS}\"{dur}>{}</res></item></DIDL-Lite>",
+         <res protocolInfo=\"http-get:*:{mime}:{features}\"{dur}>{}</res></item></DIDL-Lite>",
         xml_escape(title),
         xml_escape(uri)
     )
@@ -323,7 +350,12 @@ impl Dlna {
 
     /// `SetAVTransportURI` only (no Stop/Play).
     pub fn set_uri(&self, uri: &str, title: &str, mime: &str, duration: Option<&str>) -> Result<()> {
-        let didl = didl_metadata(uri, title, mime, duration);
+        self.set_uri_with(uri, title, mime, duration, DLNA_FLAGS)
+    }
+
+    /// [`Dlna::set_uri`] with another fourth `protocolInfo` field.
+    pub fn set_uri_with(&self, uri: &str, title: &str, mime: &str, duration: Option<&str>, features: &str) -> Result<()> {
+        let didl = didl_metadata_with(uri, title, mime, duration, features);
         self.soap(AVT, "SetAVTransportURI", &set_uri_args(uri, &didl))?;
         Ok(())
     }
@@ -331,8 +363,20 @@ impl Dlna {
     /// tv-cast's `play_uri`: Stop (errors ignored), SetAVTransportURI, then Play retried
     /// up to [`PLAY_RETRIES`] times 0.5 s apart while the TV refuses (transport locked).
     pub fn play_uri(&self, uri: &str, title: &str, mime: &str, duration: Option<&str>) -> Result<()> {
+        self.play_uri_with(uri, title, mime, duration, DLNA_FLAGS)
+    }
+
+    /// [`Dlna::play_uri`] with another fourth `protocolInfo` field.
+    pub fn play_uri_with(
+        &self,
+        uri: &str,
+        title: &str,
+        mime: &str,
+        duration: Option<&str>,
+        features: &str,
+    ) -> Result<()> {
         let _ = self.stop(); // nothing loaded yet is fine
-        self.set_uri(uri, title, mime, duration)?;
+        self.set_uri_with(uri, title, mime, duration, features)?;
         let mut attempt = 0;
         loop {
             match self.play() {
@@ -494,6 +538,19 @@ mod tests {
         assert_eq!(TransportState::parse(&field(r, "CurrentTransportState")), TransportState::Playing);
         assert_eq!(field(r, "TrackURI"), "http://a/b?c=1&d=2");
         assert_eq!(field(r, "Missing"), "");
+    }
+
+    #[test]
+    fn stream_flags_allow_time_seek_and_stalling() {
+        let bits = FLAG_STREAMING_TRANSFER | FLAG_BACKGROUND_TRANSFER | FLAG_HTTP_STALLING | FLAG_DLNA_V15;
+        assert_eq!(bits, 0x0170_0000);
+        assert_eq!(dlna_flags(bits), "01700000000000000000000000000000");
+        assert!(DLNA_FLAGS.ends_with(&dlna_flags(bits)));
+        assert_eq!(DLNA_FLAGS_STREAM, format!("DLNA.ORG_OP=10;DLNA.ORG_CI=1;DLNA.ORG_FLAGS={}", dlna_flags(bits)));
+        let d = didl_metadata_with("http://a/x.tv.mkv", "x", "video/x-matroska", Some("0:05:00.000"), DLNA_FLAGS_STREAM);
+        assert!(d.contains("protocolInfo=\"http-get:*:video/x-matroska:DLNA.ORG_OP=10;"));
+        assert!(d.contains("duration=\"0:05:00.000\""));
+        assert!(didl_metadata("u", "t", "video/mp4", None).contains(DLNA_FLAGS), "files unchanged");
     }
 
     #[test]

@@ -1071,6 +1071,27 @@ pub fn ffmpeg_args(
     Ok(a)
 }
 
+/// [`ffmpeg_args`] for a stream that starts `start` into the file: a fast input seek
+/// (`-ss` before `-i`, so the output timestamps restart at 0), plus, with `ts_offset`,
+/// `-output_ts_offset` so they read `ts_offset` again (a TV that asked for
+/// `TimeSeekRange: npt=<ts_offset>-` then shows the true position). Same output
+/// settings otherwise. Pure.
+pub fn ffmpeg_args_from(args: &[String], start: Duration, ts_offset: Option<Duration>) -> Vec<String> {
+    let secs = |d: Duration| format!("{:.3}", d.as_secs_f64());
+    let mut a = args.to_vec();
+    if let Some(off) = ts_offset.filter(|d| !d.is_zero()) {
+        // Output option: right before the output (`pipe:1`, the last argument).
+        let at = a.len().saturating_sub(1);
+        a.splice(at..at, ["-output_ts_offset".to_string(), secs(off)]);
+    }
+    if !start.is_zero() {
+        if let Some(i) = a.iter().position(|x| x == "-i") {
+            a.splice(i..i, ["-ss".to_string(), secs(start)]);
+        }
+    }
+    a
+}
+
 // ---------------------------------------------------------------------------
 // VAAPI
 
@@ -1306,6 +1327,22 @@ pub(crate) mod tests {
         assert_eq!(e.audio_bps, AC3_BITRATE);
         assert_eq!(p.selected_streams(&m), vec![0, 8, 9]);
         assert_eq!(direct_bitrate(&m), 75_800_000);
+    }
+
+    #[test]
+    fn ffmpeg_args_start_later() {
+        let m = interstellar();
+        let p = CastProfile { audio: Some(8), ..Default::default() };
+        let base = ffmpeg_args(Path::new("/in.mkv"), &m, &p, None).unwrap();
+        assert_eq!(ffmpeg_args_from(&base, Duration::ZERO, None), base, "from the start: unchanged");
+        let a = ffmpeg_args_from(&base, Duration::from_millis(90_500), Some(Duration::from_secs(30)));
+        let s = a.join(" ");
+        assert!(s.contains("-ss 90.500 -i /in.mkv"), "fast input seek before -i: {s}");
+        assert!(s.ends_with("-output_ts_offset 30.000 pipe:1"), "{s}");
+        assert_eq!(a.len(), base.len() + 4);
+        // App restart (`?t=`): timestamps restart at 0.
+        let s = ffmpeg_args_from(&base, Duration::from_secs(60), None).join(" ");
+        assert!(s.contains("-ss 60.000 -i") && !s.contains("output_ts_offset"));
     }
 
     #[test]

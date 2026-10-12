@@ -929,15 +929,11 @@ impl Tv {
             return s.play_pause();
         }
         let (d, st) = self.external_cast()?;
-        let r = if is_playing(&st) {
-            if st.tv_friendly {
-                return Err(cast::live_pause());
-            }
-            d.pause().map(|_| TransportState::Paused)
+        if is_playing(&st) {
+            external_pause(&d, &st).map(|_| TransportState::Paused)
         } else {
-            d.play().map(|_| TransportState::Playing)
-        };
-        r.map_err(dlna::friendly)
+            d.play().map(|_| TransportState::Playing).map_err(dlna::friendly)
+        }
     }
 
     /// Pause what is casting. `Ok(false)` when it already was paused (the TV would
@@ -947,14 +943,10 @@ impl Tv {
         if !is_playing(&st) {
             return Ok(false);
         }
-        if st.tv_friendly {
-            return Err(cast::live_pause());
+        match self.current_cast() {
+            Some(s) => s.pause().map(|_| true).map_err(dlna::friendly),
+            None => external_pause(&self.dlna(), &st).map(|_| true),
         }
-        let r = match self.current_cast() {
-            Some(s) => s.pause(),
-            None => self.dlna().pause(),
-        };
-        r.map(|_| true).map_err(dlna::friendly)
     }
 
     /// Resume what is casting. `Ok(false)` when it already was playing;
@@ -992,17 +984,37 @@ impl Tv {
     /// streams (and casts still loading) give [`Error::Playback`].
     pub fn seek_to(&self, to: Duration) -> Result<Duration> {
         if let Some(s) = self.current_cast() {
-            let to = cast::clamp_target(to, s.status().duration);
+            let st = s.status();
+            let to = cast::clamp_end(to, st.duration, st.tv_friendly);
             return s.seek(to).map(|_| to);
         }
         let (d, st) = self.external_cast()?;
         if !st.seekable {
             return Err(st.no_seek_error());
         }
-        let to = cast::clamp_target(to, st.duration);
-        d.seek(to).map_err(dlna::friendly)?;
-        self.inner.seek_memo.record(to);
-        Ok(to)
+        self.external_seek(&d, &st, to)
+    }
+
+    /// Seek a cast started elsewhere: only the TV's own seek is possible from here. A
+    /// TV-friendly stream its app restarted (`?t=`) counts from that offset; a target
+    /// before it, or a refusal, needs the app streaming it. A paused cast is paused
+    /// again once the TV has fetched the new point (it plays after a seek).
+    fn external_seek(&self, d: &dlna::Dlna, st: &CastStatus, to: Duration) -> Result<Duration> {
+        let to = cast::clamp_end(to, st.duration, st.tv_friendly);
+        let offset = server::start_offset(&st.url);
+        let tv_to = to.checked_sub(offset).ok_or_else(|| cast::owner_only("seek"))?;
+        match d.seek(tv_to) {
+            Ok(()) => {
+                self.inner.seek_memo.record(to);
+                // The TV plays after a seek: a paused cast stays paused.
+                if st.state == Some(dlna::TransportState::Paused) {
+                    cast::repause_after_seek(d).map_err(dlna::friendly)?;
+                }
+                Ok(to)
+            }
+            Err(Error::Soap { .. }) if st.tv_friendly => Err(cast::owner_only("seek")),
+            Err(e) => Err(dlna::friendly(e)),
+        }
     }
 
     /// Seek `delta` forward or back (clamped to the media; see
@@ -1016,10 +1028,7 @@ impl Tv {
             return Err(st.no_seek_error());
         }
         let pos = self.inner.seek_memo.base(st.position).ok_or_else(cast::position_unknown)?;
-        let to = cast::relative_target(pos, delta, forward, st.duration);
-        d.seek(to).map_err(dlna::friendly)?;
-        self.inner.seek_memo.record(to);
-        Ok(to)
+        self.external_seek(&d, &st, cast::relative_target(pos, delta, forward, st.duration))
     }
 
     /// Seek to `fraction` (0.0-1.0) of the media's length; returns the target.
@@ -1032,10 +1041,7 @@ impl Tv {
             .duration
             .filter(|_| st.seekable)
             .ok_or_else(|| st.no_seek_error())?;
-        let to = cast::fraction_target(len, fraction);
-        d.seek(to).map_err(dlna::friendly)?;
-        self.inner.seek_memo.record(to);
-        Ok(to)
+        self.external_seek(&d, &st, cast::fraction_target(len, fraction))
     }
 
     /// A remote key that acts on the cast while one plays, as on the TV's own remote:
@@ -1279,6 +1285,15 @@ impl Tv {
 /// Default location of the config file.
 pub fn default_config_path() -> PathBuf {
     Config::default_path()
+}
+
+/// Pause a cast started elsewhere: a TV-friendly stream the TV won't pause can only be
+/// paused by the app streaming it.
+fn external_pause(d: &dlna::Dlna, st: &CastStatus) -> Result<()> {
+    match d.pause() {
+        Err(Error::Soap { .. }) if st.tv_friendly => Err(cast::owner_only("pause")),
+        r => r.map_err(dlna::friendly),
+    }
 }
 
 /// Playing, or buffering towards it.

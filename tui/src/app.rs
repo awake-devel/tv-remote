@@ -407,6 +407,8 @@ impl App {
                 self.cast_announced = true;
                 self.info("Playing on the TV");
             }
+            // Which seek / pause path a TV-friendly cast took.
+            CastEvent::Note(n) => self.info(n),
             CastEvent::State(_) | CastEvent::Position { .. } | CastEvent::Throughput(_) => {}
         }
     }

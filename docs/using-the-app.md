@@ -29,7 +29,7 @@ Every button of the physical remote: power, Source, Menu, Info, Guide, Tools, Ex
 - hover the bar to see the time under the pointer;
 - click the length to show the time left instead.
 
-A live stream (a TV-friendly cast, or a radio-like URL) can't seek: the bar is greyed out and its tooltip says why.
+Direct and TV-friendly casts both seek and pause. A TV-friendly cast takes a few seconds to resume after a seek, since the conversion restarts at the new point. A live stream (a radio-like URL the TV reports without a length) can't seek: the bar is greyed out and its tooltip says why.
 
 While a cast plays, the media keys control it instead of being sent as they are: **play** and **pause** pause or resume it, **stop** stops it, and **rewind** / **fast-forward** jump back or forward 10 seconds. The **←** and **→** arrows (buttons and keyboard) also jump 10 seconds. For a live stream, rewind, fast-forward and the arrows stay plain keys, so the arrows still move through the TV's menus. With nothing casting, every key is sent as usual.
 
@@ -79,11 +79,11 @@ Plays a file from your PC on the TV. The left side is a file browser with your V
 When you pick a file, the right side shows:
 
 - **Compatibility**: ✅ plays, ⚠ needs TV-friendly mode or is untested, ❌ won't play. Expand it for details.
-- **How to cast**: **Direct** (the file as-is, seekable) or **TV-friendly** (converted on the fly). With TV-friendly, you choose the **Audio track**, the **Subtitles** and the **Video quality**, and see the **Estimated stream bitrate**.
+- **How to cast**: **Direct** (the file as-is) or **TV-friendly** (converted on the fly). Both can seek and pause. With TV-friendly, you choose the **Audio track**, the **Subtitles** and the **Video quality**, and see the **Estimated stream bitrate**.
 - **Network check**: whether your network can carry this stream, with suggested fixes you can click. **Test network** measures your network.
 - **Cast to the TV**: starts playback. It becomes available once the network check has a verdict.
 - **Cast a link**: an http(s) media URL that the TV fetches itself.
-- **Now playing**: title, pause/resume, stop, the seek bar (click a point to jump there, drag to scrub; greyed out for TV-friendly casts, which can't seek), and the throughput graph.
+- **Now playing**: title, pause/resume, stop, the seek bar (click a point to jump there, drag to scrub; greyed out only for a live stream), and the throughput graph.
 
 The stream comes from the app, so closing the window stops playback. The app asks first.
 
@@ -141,7 +141,7 @@ The main view shows the TV, its state, and what's playing: a cast from the termi
 | `?` or F1 | help |
 | `q` or Esc | quit |
 
-While a cast plays, ← and → also jump back or forward 10 seconds, and the legend says so. For a live stream (TV-friendly cast) that can't seek, the arrows, `<` `>` and the digits keep their usual TV meaning. The digits jump like in mpv only during a cast: pressing a channel number would leave the TV's player anyway.
+While a cast plays, ← and → also jump back or forward 10 seconds, and the legend says so. For a live stream that can't seek (a radio-like URL), the arrows, `<` `>` and the digits keep their usual TV meaning. The digits jump like in mpv only during a cast: pressing a channel number would leave the TV's player anyway.
 
 ### TV picker (`T`)
 

@@ -24,8 +24,8 @@ The command stays attached and shows progress. Press Ctrl-C to stop playback.
 | Video | unchanged | copied unchanged (HDR kept), or re-encoded to a lower bitrate with VAAPI |
 | Audio | all tracks; the TV plays the default one | one track you choose; DTS and TrueHD are converted to AC3 (640 kbit/s) |
 | Subtitles | whatever the TV finds in the file | one text subtitle track (SRT, ASS, WebVTT…) kept as a soft SRT track; image subtitles (PGS, VobSub) can't be kept |
-| Seeking | yes | no (the stream is live) |
-| Pausing | yes | no: the TV refuses to pause a live stream |
+| Seeking | yes | yes (ffmpeg restarts at the new point; takes a few seconds) |
+| Pausing | yes | yes |
 | PC load | almost none | light when copying video; GPU work when re-encoding |
 
 Use **direct** when the file plays as-is. Use **TV-friendly** when:
@@ -161,9 +161,24 @@ If playback freezes for 4 seconds, or the TV starts buffering in the middle, TV 
 
 To seek, click or drag the seek bar on the **Remote** page (it appears while something casts) or on the **Cast** page, or use the remote's rewind / fast-forward keys and the ← → arrows, which jump 10 seconds while a cast plays. In the terminal UI, click the progress bar, use ← → or `<` `>`, or press `0` to `9` to jump to 0 % to 90 %. On the command line, `seek` takes a time, `+10` / `-10`, or a percentage. This also works for a cast started by another device or program, as long as the TV reports its length.
 
-Right after a seek, the TV briefly refuses a pause or another seek. On a wired LAN this clears within about 0.2 s, so TV Remote retries for up to about 1.5 s and then tells you the TV can't do it right now. The TV never seeks to the very end: a jump to the end lands 1 second before it. Seeks land on a keyframe, often 1 to 3 seconds before the point you picked.
+Right after a seek, the TV briefly refuses a pause or another seek. On a wired LAN this clears within about 0.2 s, so TV Remote retries for up to about 1.5 s and then tells you the TV can't do it right now. The TV never seeks to the very end: a jump to the end lands 1 second before it, or 10 seconds before it for a TV-friendly cast (the TV can't start a stream of only a few seconds). Seeks land on a keyframe, often 1 to 3 seconds before the point you picked.
 
-A TV-friendly cast is a live stream even when the TV shows its length: TV Remote recognises it (from this app or another instance), never offers to seek in it, and greys out pause. In the first seconds of any cast the TV doesn't know the length yet; a seek then says the cast is still loading.
+### Seeking and pausing a TV-friendly cast
+
+A TV-friendly cast is converted on the fly, so the TV can't jump to a byte in it like in a file. TV Remote offers the TV the standard DLNA way instead: the stream says it supports *time seek* and *stalling* (pause). Then:
+
+- **If the TV seeks by itself**, it asks for the stream again from the new time, and TV Remote restarts ffmpeg there.
+- **If it doesn't** (it refuses the seek, or accepts it without asking for the new point within 2.5 s), the app that started the cast restarts the stream at the new point and asks the TV to play it. The picture goes black for a few seconds while the TV loads it.
+- **Pause** is first asked of the TV. If it refuses, the app stops the TV and remembers the position; resume restarts the stream there.
+- **Seeking while paused** keeps the cast paused: the TV plays after a seek, so TV Remote pauses it again once the new point is loaded (or, when the app paused it, only moves the point where it resumes).
+- **If the TV gets stuck** buffering for more than 5 seconds after a seek (sent from anywhere), the app streaming the cast restarts the stream at the seek target and says so.
+- **The end of the media** ends the cast normally, even when the TV stays on the last frame instead of stopping.
+
+Which way was used is shown: in the terminal UI's log line, on the command line of `tv-remote-tui cast` (lines starting with `note:`), and on the standard error of the app.
+
+From another program (for example `tv-remote-tui seek` or `pause` while the app or another `tv-remote-tui cast` streams), only the TV's own seek and pause are possible. If the TV refuses, the message says to use the app that started the cast.
+
+A radio-like URL that the TV reports without a length can't seek. In the first seconds of any cast the TV doesn't know the length yet; a seek then says the cast is still loading.
 
 ## When to use a USB drive instead
 

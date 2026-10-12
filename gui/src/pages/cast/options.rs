@@ -35,7 +35,7 @@ impl Options {
             .build();
         let mode = adw::ComboRow::builder().title("Mode").build();
         mode.set_model(Some(&gtk::StringList::new(&[
-            "Direct: file as-is, seekable",
+            "Direct: file as-is",
             "TV-friendly: converted on the fly",
         ])));
         let audio = adw::ComboRow::builder().title("Audio track").build();

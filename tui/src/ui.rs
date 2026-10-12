@@ -146,8 +146,9 @@ fn draw_status(f: &mut Frame, app: &mut App, area: Rect) {
                 spans.push("  (cast from another device)".fg(Color::DarkGray));
             }
             if st.tv_friendly {
-                spans.push("  [TV-friendly, no seek]".fg(Color::DarkGray));
-            } else if !st.seekable && !st.is_loading() {
+                spans.push("  [TV-friendly]".fg(Color::DarkGray));
+            }
+            if !st.seekable && !st.is_loading() {
                 spans.push("  [live stream, no seek]".fg(Color::DarkGray));
             }
             f.render_widget(Line::from(spans), l2);
@@ -480,9 +481,9 @@ fn draw_profile(f: &mut Frame, app: &mut App, area: Rect) {
         true,
         "Mode",
         if fr {
-            "TV-friendly (ffmpeg, no seeking)".into()
+            "TV-friendly (ffmpeg, converted on the fly)".into()
         } else {
-            "Direct (file as-is, seekable)".into()
+            "Direct (file as-is)".into()
         },
     ));
     lines.push(form_row(
@@ -818,7 +819,7 @@ fn draw_help(f: &mut Frame) {
     lines.extend(legend_lines(LEGEND));
     lines.push(Line::raw(""));
     lines.push(Line::styled(
-        "While a cast plays (from here or another device; not for live streams)",
+        "While a cast plays (from here or another device; not for a live URL)",
         Style::new().bold().fg(ACCENT),
     ));
     lines.extend(legend_lines(LEGEND_CASTING));
