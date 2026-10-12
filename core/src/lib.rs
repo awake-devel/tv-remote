@@ -660,8 +660,8 @@ impl Tv {
         Ok((self.smartthings()?, self.linked_smartthings_device()?))
     }
 
-    /// Turn the TV on: Wake-on-LAN (repeated every 2 s, needs `mac` in the config) and,
-    /// if the TV is in network standby, one `KEY_POWER` over the remote channel. Polls
+    /// Turn the TV on: Wake-on-LAN (repeated every 2 s) when `mac` is in the config, else
+    /// one `KEY_POWER` over the remote channel if the TV is in network standby. Polls
     /// the REST power state until it is on or `timeout` elapses.
     ///
     /// With a linked SmartThings device, the cloud `switch.on` command is also sent:
@@ -708,7 +708,10 @@ impl Tv {
                 self.inner.bus.emit(Event::Power(PowerState::On));
                 return Ok(());
             }
-            if st == PowerState::Standby && !tried_key {
+            // One way to boot, never both: with a MAC the Wake-on-LAN packets are already
+            // turning the TV on (it still reports standby while it boots), so a KEY_POWER
+            // here would toggle it back off. The key is only for TVs without a MAC.
+            if st == PowerState::Standby && mac.is_none() && !tried_key {
                 tried_key = true;
                 let _ = self.send_key(&Key::Power);
             }

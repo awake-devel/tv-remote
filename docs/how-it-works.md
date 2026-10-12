@@ -42,7 +42,7 @@ Notes:
 
 - **Pairing.** The first WebSocket connection without a token makes the TV show its approval prompt. When you accept, the TV sends a token in `ms.channel.connect`, and TV Remote saves it to that TV's entry. Later connections send the token and don't prompt.
 - **App list.** Recent firmware ignores `ed.installedApp.get` on the WebSocket. The core asks REST about each id in `KNOWN_APPS` (`core/src/lib.rs`) in parallel instead, and only falls back to the WebSocket when none is found.
-- **Wake-on-LAN** is sent to `255.255.255.255:9` and to each local subnet broadcast address, every 2 seconds until the TV answers or the timeout runs out. If the TV is in network standby, `KEY_POWER` is also sent.
+- **Wake-on-LAN** is sent to `255.255.255.255:9` and to each local subnet broadcast address, every 2 seconds until the TV answers or the timeout runs out. `KEY_POWER` is sent instead only when no MAC address is configured and the TV is in network standby; it is never combined with Wake-on-LAN, because a TV that is already booting still reports standby and the key would turn it back off.
 - **Casting.** TV Remote starts a small HTTP server on a random port, then tells the TV's DLNA renderer to play its URL. In TV-friendly mode, ffmpeg remuxes (or, with VAAPI, re-encodes) the file into a live Matroska or MPEG-TS stream.
 
 ## Config file
