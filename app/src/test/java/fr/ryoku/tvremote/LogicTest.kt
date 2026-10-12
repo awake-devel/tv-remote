@@ -68,7 +68,10 @@ class LogicTest {
         assertEquals("Connecting…", statusLine(tv("tv1"), Connection.Connecting, null))
         assertEquals("Connected", statusLine(tv("tv1"), Connection.Connected, TvPower.ON))
         assertEquals("TV off", statusLine(tv("tv1"), Connection.Retrying("refused"), TvPower.OFF))
-        assertEquals("Off or unreachable", statusLine(tv("tv1"), Connection.Disconnected, TvPower.OFF))
+        assertEquals("TV off", statusLine(tv("tv1"), Connection.Disconnected, TvPower.OFF))
+        // Found live: the socket still says Connected while the TV is already off.
+        assertEquals("TV off", statusLine(tv("tv1"), Connection.Connected, TvPower.OFF))
+        assertEquals("Standby", statusLine(tv("tv1"), Connection.Connected, TvPower.STANDBY))
     }
 
     @Test

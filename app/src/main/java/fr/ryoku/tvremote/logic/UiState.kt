@@ -78,6 +78,12 @@ fun UiState.withTvs(list: List<TvSummary>): UiState {
 /** One-line status for the active TV. */
 fun statusLine(tv: TvSummary?, connection: Connection, power: TvPower?): String {
     if (tv == null) return "No TV yet"
+    // The power poll notices a TV going off long before the WebSocket times out, so a
+    // known off/standby state wins over a stale "Connected".
+    if (connection !is Connection.Connecting && connection !is Connection.Unauthorized) {
+        if (power == TvPower.OFF) return "TV off"
+        if (power == TvPower.STANDBY) return "Standby"
+    }
     return when (connection) {
         is Connection.Connected -> if (power == TvPower.STANDBY) "Standby" else "Connected"
         is Connection.Connecting -> if (tv.paired) "Connecting…" else "Accept the prompt on the TV"
