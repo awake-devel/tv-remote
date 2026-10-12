@@ -72,8 +72,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lanGranted(): Boolean =
-        Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK ||
-            checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+        Backends.lanGranted?.invoke(this) ?: (
+            Build.VERSION.SDK_INT < LOCAL_NETWORK_SDK ||
+                checkSelfPermission(Manifest.permission.ACCESS_LOCAL_NETWORK) == PackageManager.PERMISSION_GRANTED
+            )
 
     /** Android 17+ asks before an app may reach devices on the local network (the TV). */
     fun requestLan() {

@@ -7,13 +7,12 @@ import fr.ryoku.tvremote.core.AppInfo
 import fr.ryoku.tvremote.core.CoreEvent
 import fr.ryoku.tvremote.core.EventListener
 import fr.ryoku.tvremote.core.KeyPress
-import fr.ryoku.tvremote.core.RemoteCore
+import fr.ryoku.tvremote.core.RemoteCoreInterface
 import fr.ryoku.tvremote.core.RemoteException
 import fr.ryoku.tvremote.core.RemoteKey
 import fr.ryoku.tvremote.core.TvPower
-import fr.ryoku.tvremote.core.TvRemote
+import fr.ryoku.tvremote.core.TvRemoteInterface
 import fr.ryoku.tvremote.core.YouTubeResult
-import fr.ryoku.tvremote.core.setWolBroadcasts
 import fr.ryoku.tvremote.logic.PointerAccumulator
 import fr.ryoku.tvremote.logic.UiState
 import fr.ryoku.tvremote.logic.on
@@ -45,12 +44,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val commands = Dispatchers.IO.limitedParallelism(1)
     private val io = Dispatchers.IO
 
-    @Volatile private var core: RemoteCore? = null
-    @Volatile private var tv: TvRemote? = null
+    @Volatile private var backend: Backend? = null
+    @Volatile private var core: RemoteCoreInterface? = null
+    @Volatile private var tv: TvRemoteInterface? = null
     @Volatile private var foreground = false
     private var lastErrorAt = 0L
     private var volumeJob: Job? = null
     private val pointer = PointerAccumulator()
+    @Volatile private var pendingYouTube: String? = null
     private var pointerJob: Job? = null
 
     private val listener = object : EventListener {
@@ -70,12 +71,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     init {
         viewModelScope.launch(io) {
             try {
-                val c = getApplication<TvRemoteApp>().core
+                val b = Backends.factory(getApplication())
+                backend = b
+                val c = b.core
                 core = c
                 c.setListener(listener)
                 reloadTvs()
                 _state.update { it.copy(ready = true) }
                 if (foreground) startForegroundWork()
+                flushPendingYouTube()
             } catch (e: Exception) {
                 _state.update { it.copy(ready = true, fatal = "Cannot open the settings: ${e.text()}") }
             }
@@ -99,7 +103,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun startForegroundWork() {
         val c = core ?: return
-        setWolBroadcasts(Net.lanBroadcasts(getApplication()))
+        backend?.updateWolBroadcasts(getApplication())
         c.startStatusPolling(5_000uL)
         val t = tv ?: return
         // Only reconnect on our own when paired: an unpaired first connection shows the
@@ -112,7 +116,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         core?.clearListener()
         core?.stopStatusPolling()
         tv?.disconnect()
-        tv?.close()
+        (tv as? AutoCloseable)?.close()
     }
 
     fun onLanPermission(granted: Boolean) {
@@ -129,8 +133,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val activeId = list.firstOrNull { it.active }?.id
         if (tv?.id() != activeId) {
             tv?.disconnect()
-            tv?.close()
-            tv = activeId?.let { runCatching { c.tv(it) }.getOrNull() }
+            (tv as? AutoCloseable)?.close()
+            tv = activeId?.let { id -> runCatching { backend?.tv(id) }.getOrNull() }
         }
         _state.update { it.withTvs(list) }
     }
@@ -182,13 +186,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(scanning = true, scanError = null) }
         viewModelScope.launch(io) {
             val app = getApplication<Application>()
-            if (!Net.onLan(app)) {
+            if (backend?.onLan(app) != true) {
                 _state.update {
                     it.copy(scanning = false, scanned = true, found = emptyList(), scanError = "Connect the phone to the TV's Wi-Fi")
                 }
                 return@launch
             }
-            val result = Net.withMulticast(app) { c.scan(4_000u) }
+            val result = backend!!.withMulticast(app) { c.scan(4_000u) }
             _state.update {
                 it.copy(scanning = false, scanned = true, found = result.tvs, scanError = result.error)
             }
@@ -269,7 +273,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     t.powerOff()
                     _state.update { it.copy(powers = it.powers + (t.id() to TvPower.STANDBY)) }
                 } else {
-                    setWolBroadcasts(Net.lanBroadcasts(getApplication()))
+                    backend?.updateWolBroadcasts(getApplication())
                     t.powerOn(25_000u)
                     _state.update { it.copy(powers = it.powers + (t.id() to TvPower.ON)) }
                     if (_state.value.active?.paired == true) t.connect()
@@ -336,6 +340,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A shared YouTube link: open the video on the TV. */
     fun playYouTube(url: String) {
+        // A share can cold-start the app: keep the link until the core is open.
+        pendingYouTube = url
+        if (_state.value.ready) flushPendingYouTube()
+    }
+
+    private fun flushPendingYouTube() {
+        val url = synchronized(this) { pendingYouTube.also { pendingYouTube = null } } ?: return
         command {
             when (it.youtube(url)) {
                 YouTubeResult.VIDEO -> message("Opening the video on the TV")
@@ -346,7 +357,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ----- helpers ----------------------------------------------------------------------
 
-    private fun command(block: (TvRemote) -> Unit) {
+    private fun command(block: (TvRemoteInterface) -> Unit) {
         val t = tv ?: return message("Add a TV first (TVs tab)")
         viewModelScope.launch(commands) {
             try {

@@ -108,6 +108,7 @@ android {
         versionName = "0.1.0"
         // Only the ABIs the Rust library is built for (JNA ships more).
         ndk { abiFilters += rustAbis }
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -177,6 +178,15 @@ dependencies {
     // Android native dispatch libraries).
     implementation(libs.jna) { artifact { type = "aar" } }
     debugImplementation(libs.compose.ui.tooling)
+
+    debugImplementation(libs.compose.ui.test.manifest)
+
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.androidx.test.espresso.core)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
