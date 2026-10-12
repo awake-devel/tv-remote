@@ -1,0 +1,4 @@
+[bindings.kotlin]
+package_name = "fr.ryoku.tvremote.core"
+cdylib_name = "tvremote_ffi"
+android = true
