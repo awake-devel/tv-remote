@@ -43,6 +43,7 @@ import fr.ryoku.tvremote.core.FoundTv
 import fr.ryoku.tvremote.core.TvPower
 import fr.ryoku.tvremote.core.TvSummary
 import fr.ryoku.tvremote.logic.UiState
+import fr.ryoku.tvremote.logic.statusLine
 
 @Composable
 fun TvsScreen(state: UiState, vm: MainViewModel, onRequestLan: () -> Unit) {
@@ -88,6 +89,7 @@ fun TvsScreen(state: UiState, vm: MainViewModel, onRequestLan: () -> Unit) {
             TvCard(
                 tv,
                 power = state.powers[tv.id],
+                status = if (tv.active) statusLine(tv, state.connection, state.powers[tv.id]) else null,
                 onSelect = { vm.select(tv.id) },
                 onPair = { vm.pair(tv.id) },
                 onRename = { renaming = tv },
@@ -154,6 +156,7 @@ fun TvsScreen(state: UiState, vm: MainViewModel, onRequestLan: () -> Unit) {
 private fun TvCard(
     tv: TvSummary,
     power: TvPower?,
+    status: String?,
     onSelect: () -> Unit,
     onPair: () -> Unit,
     onRename: () -> Unit,
@@ -193,6 +196,9 @@ private fun TvCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (status != null) {
+                Text(status, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+            }
             if (!tv.paired) {
                 FilledTonalButton(onClick = onPair, modifier = Modifier.padding(top = 6.dp)) {
                     Text("Pair: a prompt appears on the TV")

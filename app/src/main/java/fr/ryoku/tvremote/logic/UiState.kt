@@ -81,7 +81,7 @@ fun statusLine(tv: TvSummary?, connection: Connection, power: TvPower?): String 
     return when (connection) {
         is Connection.Connected -> if (power == TvPower.STANDBY) "Standby" else "Connected"
         is Connection.Connecting -> if (tv.paired) "Connecting…" else "Accept the prompt on the TV"
-        is Connection.Unauthorized -> "Refused on the TV: allow it in the TV's device settings"
+        is Connection.Unauthorized -> "Not allowed: the TV prompt was refused or not answered"
         is Connection.Retrying -> when (power) {
             TvPower.OFF -> "TV off"
             else -> "Reconnecting…"
