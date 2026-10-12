@@ -14,6 +14,7 @@
 
 #![warn(missing_docs)]
 
+pub mod apps;
 pub mod cast;
 pub mod config;
 pub mod dial;
@@ -127,35 +128,7 @@ impl Drop for TvInner {
     }
 }
 
-/// Tizen app ids probed by [`Tv::installed_apps`] (id, fallback name). The TV's own
-/// name wins when it reports one. Add ids here to make more apps show up.
-pub const KNOWN_APPS: &[(&str, &str)] = &[
-    ("111299001912", "YouTube"),
-    ("3201907018807", "Netflix"),
-    ("3201910019365", "Prime Video"),
-    ("3201901017640", "Disney+"),
-    ("3201807016597", "Apple TV"),
-    ("3201606009684", "Spotify"),
-    ("3202010022079", "Browser"),
-    ("org.tizen.browser", "Internet"),
-    ("3201512006963", "Plex"),
-    ("3202203026841", "Twitch"),
-    ("3201812017479", "myCANAL"),
-    ("3201911019629", "france.tv"),
-    ("3201709014773", "Molotov"),
-    ("3201608010191", "Deezer"),
-    ("3202301029760", "Max"),
-    ("3201710015067", "Paramount+"),
-    ("3201908019041", "Crunchyroll"),
-    ("3201906018702", "Kodi"),
-    ("3201601007230", "ARTE"),
-    ("3201712015183", "TF1+"),
-    ("3201801015366", "M6+"),
-    ("3201702011851", "Steam Link"),
-    ("3202203026723", "Xbox"),
-    ("3201906018693", "Gaming Hub"),
-    ("3201712015217", "SmartThings"),
-];
+pub use apps::KNOWN_APPS;
 
 /// The TV. Cheap to clone (all clones share state); `Send + Sync`.
 ///
@@ -397,38 +370,45 @@ impl Tv {
     /// Installed apps.
     ///
     /// Tizen 2025 firmware ignores `ed.installedApp.get` from third-party clients, so this
-    /// first asks REST about every id in [`KNOWN_APPS`] (in parallel, ~1 s) and keeps the
-    /// ones the TV reports. Only if none is found does it fall back to the remote channel
-    /// (older firmware; up to ~10 s).
+    /// asks REST about every id in [`KNOWN_APPS`] (16 at a time, ~1 s) and keeps the ones
+    /// the TV reports (see [`apps`]). Only if none is found does it fall back to the remote
+    /// channel (older firmware; up to ~10 s). Apps outside the catalog are not listed.
     pub fn installed_apps(&self) -> Result<Vec<App>> {
-        let found = self.probe_known_apps();
+        self.installed_apps_with(&[])
+    }
+
+    /// [`Tv::installed_apps`], also probing `extra` app ids (e.g. ones the user added).
+    pub fn installed_apps_with(&self, extra: &[&str]) -> Result<Vec<App>> {
+        // One quick request first: with the TV off, 160 probes would each wait for the
+        // connect timeout.
+        let found = if self.device_info().is_ok() { self.probe_apps(apps::probe_ids(extra)) } else { Vec::new() };
         if !found.is_empty() {
             return Ok(found);
         }
         self.remote().installed_apps()
     }
 
-    fn probe_known_apps(&self) -> Vec<App> {
-        let handles: Vec<_> = KNOWN_APPS
-            .iter()
-            .map(|&(id, fallback_name)| {
+    /// REST status of each id, [`apps::PROBE_PARALLELISM`] at a time.
+    fn probe_apps(&self, ids: Vec<(String, String)>) -> Vec<App> {
+        let queue = Arc::new(Mutex::new(ids));
+        let workers: Vec<_> = (0..apps::PROBE_PARALLELISM)
+            .map(|_| {
                 let rest = self.rest();
+                let queue = queue.clone();
                 std::thread::spawn(move || {
-                    rest.app_status(id).ok().map(|st| App {
-                        app_id: id.to_string(),
-                        name: st.name.unwrap_or_else(|| fallback_name.to_string()),
-                        app_type: 2,
-                        icon: None,
-                    })
+                    let mut found = Vec::new();
+                    loop {
+                        let next = queue.lock().ok().and_then(|mut q| q.pop());
+                        let Some((id, fallback_name)) = next else { break };
+                        if let Ok(st) = rest.app_status(&id) {
+                            found.push(App { app_id: id, name: st.name.unwrap_or(fallback_name), app_type: 2, icon: None });
+                        }
+                    }
+                    found
                 })
             })
             .collect();
-        let mut apps: Vec<App> = handles
-            .into_iter()
-            .filter_map(|h| h.join().ok().flatten())
-            .collect();
-        apps.sort_by_key(|a| a.name.to_lowercase());
-        apps
+        apps::merge_apps(workers.into_iter().filter_map(|h| h.join().ok()).collect())
     }
 
     /// Launch an installed app: REST `POST /api/v2/applications/<id>` first (works for

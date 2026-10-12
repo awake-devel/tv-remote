@@ -88,7 +88,7 @@ tv.start_status_polling(Duration::from_secs(5)); // emits Event::Power on change
 | Area | Methods |
 |---|---|
 | Config | `open_default()`, `open_or_default(path)`, `open(path)`, `new(cfg)`; `config()`, `update_config(|c| ...)` (saves, emits `ConfigChanged`, reconnects if host/token changed), `host()` |
-| Remote (WebSocket) | `connect()`, `disconnect()`, `connection_state()`, `send_key(&Key)`, `send_key_action(&Key, KeyAction)`, `hold_key(&Key, dur)`, `send_text(&str)`, `mouse_move(dx, dy)`, `mouse_click()`, `installed_apps() -> Vec<App>`, `launch_app(&App)`, `launch_app_id(id, LaunchType, meta)` |
+| Remote (WebSocket) | `connect()`, `disconnect()`, `connection_state()`, `send_key(&Key)`, `send_key_action(&Key, KeyAction)`, `hold_key(&Key, dur)`, `send_text(&str)`, `mouse_move(dx, dy)`, `mouse_click()`, `installed_apps() -> Vec<App>` (REST probe of the `apps::KNOWN_APPS` catalog, ~160 ids; `installed_apps_with(&extra_ids)` adds ids), `launch_app(&App)`, `launch_app_id(id, LaunchType, meta)` |
 | REST | `device_info() -> DeviceInfo`, `power_state() -> PowerState` (never errors; unreachable = `Off`), `cached_device_info()` / `tv_network() -> Option<TvNetwork>` (no I/O; filled by `device_info`, `power_state` and the status poller), `app_status(id)`, `close_app(id)` |
 | Power | `power_on(timeout)` (WoL every 2 s, plus `KEY_POWER` if in network standby; polls until on), `power_off()` |
 | Volume (DLNA) | `volume()`, `set_volume(u8)`, `mute()`, `set_mute(bool)` |
