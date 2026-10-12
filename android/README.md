@@ -90,6 +90,19 @@ land in `app/build/generated/uniffi/kotlin` (package `fr.ryoku.tvremote.core`).
 Without adb: copy the APK to the phone and open it (allow installing unknown apps for the
 file manager when asked).
 
+### Release builds
+
+Pushing a tag `vX.Y.Z` makes GitHub Actions (`.github/workflows/release.yml`) build a
+signed release APK and the Linux binaries and publish them as the release. The APK is signed
+with the release key from the repository secrets `TVR_KEYSTORE_B64`, `TVR_KEYSTORE_PASSWORD`,
+`TVR_KEY_ALIAS` and `TVR_KEY_PASSWORD`. Every release must use the same key, or it won't
+install over the previous one.
+
+A signed release build locally: set `TVR_KEYSTORE_FILE` (path to the keystore) and the three
+other variables above, then
+`./gradlew assembleRelease -PversionName=X.Y.Z -PversionCode=<major*10000+minor*100+patch>`.
+Without those variables the release APK is unsigned.
+
 ## Notes
 
 - The TV's HTTP services (REST :8001, DIAL :8080, UPnP :9197) are cleartext: Android's

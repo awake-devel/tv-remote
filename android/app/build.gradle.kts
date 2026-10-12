@@ -104,16 +104,34 @@ android {
         applicationId = "fr.ryoku.tvremote"
         minSdk = appMinSdk
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        // Releases pass -PversionName=<tag without v> -PversionCode=<major*10000 +
+        // minor*100 + patch> (see .github/workflows/release.yml); local builds keep these
+        // defaults.
+        versionCode = providers.gradleProperty("versionCode").orNull?.toInt() ?: 200
+        versionName = providers.gradleProperty("versionName").orNull ?: "0.2.0"
         // Only the ABIs the Rust library is built for (JNA ships more).
         ndk { abiFilters += rustAbis }
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    // Release signing key from the environment (CI: repository secrets; locally: see
+    // README). Without it, release builds stay unsigned.
+    val releaseKeystore = providers.environmentVariable("TVR_KEYSTORE_FILE").orNull
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = providers.environmentVariable("TVR_KEYSTORE_PASSWORD").get()
+                keyAlias = providers.environmentVariable("TVR_KEY_ALIAS").get()
+                keyPassword = providers.environmentVariable("TVR_KEY_PASSWORD").get()
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
         }
     }
     compileOptions {

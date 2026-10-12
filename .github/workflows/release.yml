@@ -1,0 +1,138 @@
+# Pushing a tag vX.Y.Z builds the Linux binaries and the Android APK and publishes them
+# as the GitHub release for that tag. The release notes come from
+# .github/release-notes/vX.Y.Z.md when it exists.
+#
+# Secrets (Settings → Secrets and variables → Actions) for the signed APK:
+#   TVR_KEYSTORE_B64       the release keystore, base64-encoded
+#   TVR_KEYSTORE_PASSWORD  its store password
+#   TVR_KEY_ALIAS          the key alias
+#   TVR_KEY_PASSWORD       the key password
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    # The desktop app needs GTK 4.22 and libadwaita 1.8, newer than Ubuntu ships.
+    container: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git rust gtk4 libadwaita pkgconf openssl
+
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches the Cargo version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Cargo.toml says $version, tag is $GITHUB_REF_NAME"; exit 1; }
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Package
+        run: |
+          name="tv-remote-${GITHUB_REF_NAME#v}-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/tv-remote target/release/tv-remote-tui tv-remote.desktop README.md LICENSE "dist/$name/"
+          strip "dist/$name/tv-remote" "dist/$name/tv-remote-tui"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Install the SDK platform, build-tools and NDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" "build-tools;37.0.0" "ndk;29.0.14206865"
+
+      - name: Install the Rust Android targets and cargo-ndk
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+          cargo install cargo-ndk --version 4.1.2 --locked
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+
+      - name: Rust FFI tests
+        working-directory: android/rust
+        run: cargo test --locked
+
+      - name: Build the signed APK
+        env:
+          TVR_KEYSTORE_B64: ${{ secrets.TVR_KEYSTORE_B64 }}
+          TVR_KEYSTORE_PASSWORD: ${{ secrets.TVR_KEYSTORE_PASSWORD }}
+          TVR_KEY_ALIAS: ${{ secrets.TVR_KEY_ALIAS }}
+          TVR_KEY_PASSWORD: ${{ secrets.TVR_KEY_PASSWORD }}
+        run: |
+          test -n "$TVR_KEYSTORE_B64" || { echo "the TVR_KEYSTORE_B64 secret is missing"; exit 1; }
+          export TVR_KEYSTORE_FILE="$RUNNER_TEMP/release.jks"
+          echo "$TVR_KEYSTORE_B64" | base64 -d > "$TVR_KEYSTORE_FILE"
+          version="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch <<< "${version%%-*}"
+          code=$((major * 10000 + minor * 100 + patch))
+          ./gradlew --no-configuration-cache testDebugUnitTest assembleRelease \
+            -PversionName="$version" -PversionCode="$code"
+          rm -f "$TVR_KEYSTORE_FILE"
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/tv-remote-$version-android.apk"
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs "dist/tv-remote-$version-android.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: android/dist/*.apk
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: [linux, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=".github/release-notes/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
+          gh release create "$GITHUB_REF_NAME" --title "TV Remote ${GITHUB_REF_NAME#v}" "$@" dist/*
