@@ -24,6 +24,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -35,6 +42,10 @@ import fr.ryoku.tvremote.logic.UiState
 @Composable
 fun AppsScreen(state: UiState, vm: MainViewModel) {
     val haptic = rememberHaptic()
+    var addingId by remember { mutableStateOf(false) }
+    if (addingId) {
+        AddAppIdDialog(onAdd = { vm.addAppId(it); addingId = false }, onDismiss = { addingId = false })
+    }
     LaunchedEffect(state.activeId) {
         if (state.activeId != null && state.apps.isEmpty()) vm.loadApps()
     }
@@ -53,11 +64,13 @@ fun AppsScreen(state: UiState, vm: MainViewModel) {
             FilledTonalButton(onClick = { haptic(); vm.netflix() }, Modifier.weight(1f)) { Text("Netflix") }
         }
         Text(
-            "Tip: share a YouTube link to “Play on TV” to open the video on the TV.",
+            "Apps the TV confirms from a list of known app ids: the TV gives no full list, so a " +
+                "few (mostly system apps) can be missing. Tip: share a YouTube link to “Play on TV”.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(vertical = 8.dp),
         )
+        TextButton(onClick = { addingId = true }, enabled = state.activeId != null) { Text("Missing an app? Add it by id") }
         when {
             state.activeId == null -> Centered("Add a TV first (TVs tab).")
             state.appsLoading && state.apps.isEmpty() -> Box(Modifier.fillMaxSize(), Alignment.Center) { CircularProgressIndicator() }
@@ -96,4 +109,24 @@ fun Centered(text: String) {
     Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
         Text(text, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
+}
+
+@Composable
+private fun AddAppIdDialog(onAdd: (String) -> Unit, onDismiss: () -> Unit) {
+    var id by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add an app by id") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "The Tizen app id, e.g. 3201907018807 for Netflix (shown in the app's page on apps.samsung.com).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedTextField(id, { id = it.trim() }, label = { Text("App id") }, singleLine = true)
+            }
+        },
+        confirmButton = { TextButton(onClick = { onAdd(id) }, enabled = id.isNotBlank()) { Text("Add") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

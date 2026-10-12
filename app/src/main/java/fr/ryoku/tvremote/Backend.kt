@@ -46,8 +46,13 @@ object Backends {
     @Volatile
     var lanGranted: ((Context) -> Boolean)? = null
 
+    /** SharedPreferences file for user settings (tests use their own). */
+    @Volatile
+    var prefsName: String = "apps"
+
     fun reset() {
         factory = { RealBackend(it as TvRemoteApp) }
         lanGranted = null
+        prefsName = "apps"
     }
 }

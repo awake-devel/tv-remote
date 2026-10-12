@@ -89,6 +89,16 @@ class FakeTv(private val id: String, private val name: String, private val host:
         return apps
     }
 
+    /** Ids the TV "has" besides [apps], as an extra-id probe would find them. */
+    @Volatile var hiddenApps: Map<String, String> = mapOf("3202311033030" to "Pathé Home")
+
+    val extraProbes: MutableList<List<String>> = Collections.synchronizedList(mutableListOf())
+
+    override fun installedAppsWith(extraIds: List<String>): List<AppInfo> {
+        extraProbes.add(extraIds)
+        return installedApps() + extraIds.mapNotNull { id -> hiddenApps[id]?.let { AppInfo(id, it, 2, null) } }
+    }
+
     override fun launchApp(app: AppInfo) = record(Call.Launch(app.appId))
 
     override fun launchAppId(appId: String) = record(Call.LaunchId(appId))

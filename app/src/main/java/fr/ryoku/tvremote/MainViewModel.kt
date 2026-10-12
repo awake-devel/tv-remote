@@ -1,6 +1,7 @@
 package fr.ryoku.tvremote
 
 import android.app.Application
+import androidx.core.content.edit
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import fr.ryoku.tvremote.core.AppInfo
@@ -324,13 +325,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(appsLoading = true, appsError = null) }
         viewModelScope.launch(io) {
             try {
-                val apps = t.installedApps().sortedBy { it.name.lowercase() }
+                val apps = t.installedAppsWith(extraAppIds().toList()).sortedBy { it.name.lowercase() }
                 _state.update { it.copy(apps = apps, appsLoading = false) }
             } catch (e: Exception) {
                 _state.update { it.copy(appsLoading = false, appsError = e.text()) }
             }
         }
     }
+
+    /**
+     * Apps outside the core's catalog can't be found by the TV's API: the user can add
+     * their id (from apps.samsung.com or the TV's app info). Kept in the app's settings.
+     */
+    fun addAppId(id: String) {
+        val clean = id.trim()
+        if (clean.isEmpty()) return
+        val t = tv ?: return message("Add a TV first (TVs tab)")
+        viewModelScope.launch(io) {
+            try {
+                val apps = t.installedAppsWith((extraAppIds() + clean).toList())
+                val app = apps.firstOrNull { it.appId == clean }
+                if (app == null) {
+                    message("The TV has no app with id $clean")
+                } else {
+                    prefs().edit { putStringSet(KEY_EXTRA_APPS, extraAppIds() + clean) }
+                    _state.update { it.copy(apps = apps.sortedBy { a -> a.name.lowercase() }) }
+                    message("Added ${app.name}")
+                }
+            } catch (e: Exception) {
+                message("Cannot check the app: ${e.text()}")
+            }
+        }
+    }
+
+    private fun prefs() = getApplication<Application>().getSharedPreferences(Backends.prefsName, android.content.Context.MODE_PRIVATE)
+
+    private fun extraAppIds(): Set<String> = prefs().getStringSet(KEY_EXTRA_APPS, emptySet()) ?: emptySet()
 
     fun launch(app: AppInfo) = command { it.launchApp(app) }
 
@@ -397,6 +427,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     companion object {
         const val YOUTUBE_APP_ID = "111299001912"
+        private const val KEY_EXTRA_APPS = "extra_app_ids"
     }
 }
 

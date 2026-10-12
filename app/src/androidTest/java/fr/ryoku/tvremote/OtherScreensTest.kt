@@ -72,6 +72,29 @@ class AppsTest : AppTestBase() {
     }
 
     @Test
+    fun addAnAppById() {
+        launchWithTv()
+        tab("Apps")
+        waitForText("Browser")
+        waitForText("known app ids", substring = true)
+        clickText("Missing an app? Add it by id")
+        waitForText("Add an app by id")
+        rule.onNode(hasSetTextAction()).performTextInput("3202311033030")
+        clickText("Add")
+        waitForText("Pathé Home")
+        waitForText("Added Pathé Home")
+        // Remembered: the next refresh probes it again.
+        rule.onNode(hasContentDescription("Reload the list")).performClick()
+        waitFor { tv.extraProbes.any { it.contains("3202311033030") } && tv.extraProbes.size >= 3 }
+        // An id the TV doesn't have is refused.
+        clickText("Missing an app? Add it by id")
+        rule.onNode(hasSetTextAction()).performTextInput("3209999999999")
+        clickText("Add")
+        // After the "Added" snackbar (4 s) has gone.
+        waitFor(15_000) { exists(hasText("no app with id 3209999999999", substring = true)) }
+    }
+
+    @Test
     fun listErrorOffersARetry() {
         launch {
             addTv(TV_NAME, "192.0.2.10").appsFailure = RemoteException.Unreachable("TV off")

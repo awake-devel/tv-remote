@@ -36,6 +36,7 @@ abstract class AppTestBase {
         backend.core.setup()
         Backends.factory = { backend }
         Backends.lanGranted = { true }
+        Backends.prefsName = TEST_PREFS
         scenario = if (intent != null) ActivityScenario.launch(intent) else ActivityScenario.launch(MainActivity::class.java)
         waitFor { core.eventListener != null }
     }
@@ -52,6 +53,8 @@ abstract class AppTestBase {
             scenario.onActivity { it.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
             scenario.close()
         }
+        androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
+            .getSharedPreferences(TEST_PREFS, android.content.Context.MODE_PRIVATE).edit().clear().commit()
         Backends.reset()
     }
 
@@ -91,5 +94,6 @@ abstract class AppTestBase {
 
     companion object {
         const val TV_NAME = "Living room"
+        const val TEST_PREFS = "apps-test"
     }
 }

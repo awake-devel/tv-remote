@@ -566,8 +566,16 @@ impl TvRemote {
         Ok(self.tv.mouse_click()?)
     }
 
+    /// The TV's apps found by probing the core's catalog of known app ids (Tizen 2025
+    /// has no full list for third parties).
     pub fn installed_apps(&self) -> Res<Vec<AppInfo>> {
         Ok(self.tv.installed_apps()?.into_iter().map(AppInfo::from).collect())
+    }
+
+    /// [`TvRemote::installed_apps`], also probing `extra_ids` (apps the user added by id).
+    pub fn installed_apps_with(&self, extra_ids: Vec<String>) -> Res<Vec<AppInfo>> {
+        let extra: Vec<&str> = extra_ids.iter().map(String::as_str).collect();
+        Ok(self.tv.installed_apps_with(&extra)?.into_iter().map(AppInfo::from).collect())
     }
 
     pub fn launch_app(&self, app: AppInfo) -> Res<()> {
