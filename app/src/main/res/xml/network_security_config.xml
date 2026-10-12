@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The TV speaks plain HTTP on the LAN (REST :8001, DIAL :8080, UPnP :9197). Android's
+  domain rules match host names, not IP ranges, so private address ranges cannot be
+  listed here; cleartext is allowed for the app. It only ever talks to TVs on the local
+  network: the core has no Internet endpoint besides SmartThings (HTTPS, unused here).
+  The remote-control WebSocket is TLS (wss :8002).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
