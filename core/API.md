@@ -286,3 +286,19 @@ Unmeasured, TV wireless or unknown (`tv` = `None`): ❌ above 40 Mbps, ⚠ above
 ❌ above 80 Mbps, ⚠ above 50 Mbps (many TVs have a 100 Mbit/s port). The wording only says the TV is on Wi-Fi
 when it is known to be; unknown is hedged ("If the TV is on Wi-Fi too…"). The provisional peak is the average × 1.5;
 reduced video counts at its target bitrate and AC3 at 640 kbps.
+
+## Platforms without `$HOME` (Android) and TLS backends
+
+- **TLS** is a cargo feature. `native-tls` (default) uses OpenSSL, as the desktop apps always have. `rustls`
+  (`default-features = false, features = ["rustls"]`) is pure Rust (rustls + ring, Mozilla roots from `webpki-roots`) and
+  cross-compiles without OpenSSL; the Android app uses it. With both on, rustls wins. Either way the TV's WebSocket
+  accepts any certificate and SmartThings HTTPS is validated. `tls::backend()` names the one compiled in. To try rustls
+  against a real TV from the desktop: `cargo run -p tv-remote-tui --features tvremote_core/rustls -- …`.
+- **Config file**: pass an explicit path (`Fleet::open_or_default(path)`, `Tv::open_or_default(path)`); nothing else
+  needs `$HOME` for the remote, apps, volume, power and discovery.
+- **Cache** (`config::cache_dir()`, e.g. `Fleet::last_scan()`): call `config::set_cache_dir(dir)` once at start-up.
+- **Wake-on-LAN** sends to 255.255.255.255 plus the subnet broadcasts that `ip -o -4 addr` lists. Where `ip` is
+  unavailable, give the broadcast addresses with `wol::set_broadcast_hints(vec![…])` (kept for the process; replaced
+  by the next call). `wol::wol_targets` is the pure merge.
+- Casting (ffmpeg/ffprobe), the network check (`/proc/net/*`, `iw`) and the SmartThings browser login (`xdg-open`)
+  still assume a desktop Linux.

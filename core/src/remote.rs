@@ -548,15 +548,7 @@ impl Worker {
 }
 
 fn set_read_timeout(ws: &mut Ws, d: Duration) {
-    match ws.get_mut() {
-        MaybeTlsStream::Plain(s) => {
-            let _ = s.set_read_timeout(Some(d));
-        }
-        MaybeTlsStream::NativeTls(s) => {
-            let _ = s.get_mut().set_read_timeout(Some(d));
-        }
-        _ => {}
-    }
+    crate::tls::set_read_timeout(ws.get_mut(), d);
 }
 
 /// Connect, then wait for `ms.channel.connect` (returns its `data.token`, if any).
@@ -572,17 +564,13 @@ fn open_and_pair(cfg: &Config) -> Result<(Ws, Option<String>)> {
     tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(Duration::from_secs(8)))?;
     tcp.set_write_timeout(Some(Duration::from_secs(8)))?;
-    let tls = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
-        .build()
-        .map_err(|e| Error::WebSocket(format!("TLS init: {e}")))?;
+    let tls = crate::tls::tv_ws_connector()?;
     let url = ws_url(&cfg.host, cfg.port, &cfg.name, cfg.token.as_deref());
     let (mut ws, _resp) = tungstenite::client_tls_with_config(
         url.as_str(),
         tcp,
         None,
-        Some(tungstenite::Connector::NativeTls(tls)),
+        Some(tls),
     )
     .map_err(|e| Error::WebSocket(format!("handshake failed: {e}")))?;
 

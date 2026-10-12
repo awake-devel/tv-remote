@@ -2,6 +2,7 @@
 
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::process::Command;
+use std::sync::RwLock;
 
 use crate::error::{Error, Result};
 
@@ -53,16 +54,38 @@ pub fn local_broadcasts() -> Vec<Ipv4Addr> {
         .unwrap_or_default()
 }
 
+/// Set by [`set_broadcast_hints`].
+static HINTS: RwLock<Vec<Ipv4Addr>> = RwLock::new(Vec::new());
+
+/// Subnet broadcast addresses to add to every magic packet from now on (replaces the
+/// previous hints). For platforms where `ip` cannot list them: the Android app passes
+/// its Wi-Fi network's broadcast address.
+pub fn set_broadcast_hints(addrs: Vec<Ipv4Addr>) {
+    if let Ok(mut g) = HINTS.write() {
+        *g = addrs;
+    }
+}
+
+/// 255.255.255.255 then each address of the lists, without duplicates. Pure.
+pub fn wol_targets(lists: &[&[Ipv4Addr]]) -> Vec<Ipv4Addr> {
+    let mut out = vec![Ipv4Addr::BROADCAST];
+    for a in lists.iter().flat_map(|l| l.iter()) {
+        if !out.contains(a) {
+            out.push(*a);
+        }
+    }
+    out
+}
+
 /// Send the magic packet for `mac` to 255.255.255.255:9 and every subnet broadcast
-/// (plus `extra` targets). Succeeds if at least one send worked.
+/// (from `ip`, the [`set_broadcast_hints`], and `extra`). Succeeds if at least one send
+/// worked.
 pub fn send_magic_packet(mac: &str, extra: &[Ipv4Addr]) -> Result<()> {
     let pkt = magic_packet(parse_mac(mac)?);
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.set_broadcast(true)?;
-    let mut targets = vec![Ipv4Addr::BROADCAST];
-    targets.extend(local_broadcasts());
-    targets.extend_from_slice(extra);
-    targets.dedup();
+    let hints = HINTS.read().map(|g| g.clone()).unwrap_or_default();
+    let targets = wol_targets(&[&local_broadcasts(), &hints, extra]);
     let mut ok = false;
     let mut last_err = None;
     for t in targets {
@@ -98,5 +121,13 @@ mod tests {
     fn broadcasts() {
         let out = "1: lo    inet 127.0.0.1/8 scope host lo\n3: wlan0    inet 192.168.0.42/24 brd 192.168.0.255 scope global dynamic wlan0\n";
         assert_eq!(parse_broadcasts(out), vec![Ipv4Addr::new(192, 168, 0, 255)]);
+    }
+
+    #[test]
+    fn targets() {
+        let a = Ipv4Addr::new(192, 168, 0, 255);
+        let b = Ipv4Addr::new(10, 0, 0, 255);
+        assert_eq!(wol_targets(&[&[a], &[a, Ipv4Addr::BROADCAST], &[b]]), vec![Ipv4Addr::BROADCAST, a, b]);
+        assert_eq!(wol_targets(&[]), vec![Ipv4Addr::BROADCAST]);
     }
 }

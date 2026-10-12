@@ -31,6 +31,7 @@ pub mod rest;
 pub mod server;
 pub mod smartthings;
 pub mod smartthings_auth;
+pub mod tls;
 pub mod wol;
 
 use std::path::{Path, PathBuf};

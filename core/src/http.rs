@@ -1,9 +1,8 @@
 //! Internal HTTP helpers around `ureq` 2.x.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// Agent for plain-HTTP calls on the LAN (REST :8001, DLNA :9197, DIAL :8080).
 pub(crate) fn lan_agent(timeout: Duration) -> ureq::Agent {
@@ -15,13 +14,10 @@ pub(crate) fn lan_agent(timeout: Duration) -> ureq::Agent {
 
 /// Agent for HTTPS calls with normal certificate validation (SmartThings).
 pub(crate) fn tls_agent(timeout: Duration) -> Result<ureq::Agent> {
-    let connector = native_tls::TlsConnector::new()
-        .map_err(|e| Error::Http(format!("TLS init failed: {e}")))?;
-    Ok(ureq::AgentBuilder::new()
+    let builder = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
-        .timeout(timeout)
-        .tls_connector(Arc::new(connector))
-        .build())
+        .timeout(timeout);
+    Ok(crate::tls::verified(builder)?.build())
 }
 
 /// Map a ureq result to (status, body) without treating 4xx/5xx as transport errors.

@@ -712,8 +712,23 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/"))
 }
 
-/// `~/.cache/tv-remote/` (honours `$XDG_CACHE_HOME`); created on demand.
+/// Set by [`set_cache_dir`].
+static CACHE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Use `dir` instead of `~/.cache/tv-remote/` for this process, for platforms without a
+/// usable `$HOME` (the Android app passes its `cacheDir`). The first call wins; returns
+/// `false` if a directory was already set.
+pub fn set_cache_dir(dir: PathBuf) -> bool {
+    CACHE_DIR.set(dir).is_ok()
+}
+
+/// `~/.cache/tv-remote/` (honours `$XDG_CACHE_HOME`), or the [`set_cache_dir`] override;
+/// created on demand.
 pub fn cache_dir() -> PathBuf {
+    if let Some(dir) = CACHE_DIR.get() {
+        let _ = fs::create_dir_all(dir);
+        return dir.clone();
+    }
     let base = std::env::var_os("XDG_CACHE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

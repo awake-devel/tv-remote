@@ -13,6 +13,18 @@ serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"
 base64 = "0.22.1"
-native-tls = "0.2.14"
-tungstenite = { version = "0.24.0", features = ["native-tls"] }
-ureq = { version = "2.12.1", default-features = false, features = ["json", "native-tls"] }
+native-tls = { version = "0.2.14", optional = true }
+tungstenite = "0.24.0"
+ureq = { version = "2.12.1", default-features = false, features = ["json"] }
+# Only with the `rustls` feature (ring provider: no cmake/OpenSSL needed to cross-compile).
+rustls = { version = "0.23.19", default-features = false, features = ["ring", "logging", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+[features]
+default = ["native-tls"]
+# TLS through native-tls (OpenSSL on Linux). The desktop build.
+native-tls = ["dep:native-tls", "tungstenite/native-tls", "ureq/native-tls"]
+# Pure-Rust TLS (rustls + ring, Mozilla roots from webpki-roots): nothing to link, so it
+# cross-compiles for Android. Takes precedence when both features are on, which also lets
+# the desktop apps try it: `cargo run -p tv-remote-tui --features tvremote_core/rustls`.
+rustls = ["dep:rustls", "dep:webpki-roots", "tungstenite/rustls-tls-webpki-roots", "ureq/tls"]
